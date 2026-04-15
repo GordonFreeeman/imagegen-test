@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
     <meta charset="UTF-8">
-    <title>Kugelsicherer KI Generator (Referrer Fix)</title>
+    <title>Kugelsicherer KI Generator</title>
     <style>
         body {
             font-family: system-ui, -apple-system, sans-serif;
@@ -81,7 +81,7 @@
 <body>
 
     <div class="card">
-        <h2>🎨 Stressfreier Generator (Referrer Fix)</h2>
+        <h2>🎨 Stressfreier Generator (Pollinations)</h2>
 
         <div class="input-group">
             <label for="prompt">Was soll generiert werden?</label>
@@ -109,33 +109,34 @@
                 return;
             }
 
-            // UI zurücksetzen
+            // UI anpassen
             placeholderEl.style.display = 'none';
             imgEl.style.display = 'none';
             loadingEl.style.display = 'block';
 
+            // Der Trick: Wir bauen einfach die URL zusammen. 
+            // encodeURIComponent stellt sicher, dass Leerzeichen etc. korrekt umgewandelt werden.
+            // Ein zufälliger Seed am Ende erzwingt ein neues Bild, selbst bei gleichem Prompt.
             const randomSeed = Math.floor(Math.random() * 100000);
             const safePrompt = encodeURIComponent(prompt);
+            
+            // Die Pollinations-URL. width/height auf 512, nologo entfernt das Wasserzeichen.
             const imageUrl = `https://image.pollinations.ai/prompt/${safePrompt}?width=512&height=512&nologo=true&seed=${randomSeed}`;
 
-            // 1. WICHTIG: Referrer auf 'no-referrer' setzen, um localhost zu verstecken
-            imgEl.referrerPolicy = "no-referrer";
-            
-            // 2. Sicherstellen, dass kein 'crossorigin' Attribut stört (da wir nur anzeigen wollen)
-            imgEl.removeAttribute("crossorigin");
-
+            // Wenn das Bild fertig geladen ist, verstecken wir den Lade-Text und zeigen das Bild.
             imgEl.onload = () => {
                 loadingEl.style.display = 'none';
                 imgEl.style.display = 'block';
             };
 
+            // Falls doch was schiefgeht (z.B. offline)
             imgEl.onerror = () => {
                 loadingEl.style.display = 'none';
                 placeholderEl.style.display = 'block';
-                placeholderEl.innerText = "Fehler beim Laden. Prüfe die Konsole (F12).";
+                placeholderEl.innerText = "Fehler beim Laden des Bildes.";
             };
 
-            // 3. Erst jetzt die URL zuweisen
+            // Das Setzen der Quelle startet den Ladevorgang automatisch im Hintergrund!
             imgEl.src = imageUrl;
         }
     </script>
