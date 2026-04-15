@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>Kugelsicherer KI Generator (Referrer Fix)</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background-color: #f4f5f7;
+            color: #333;
+            max-width: 600px;
+            margin: 40px auto;
+            padding: 20px;
+        }
+        .card {
+            background: white;
+            padding: 24px;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        .input-group {
+            margin-bottom: 16px;
+        }
+        label {
+            display: block;
+            font-weight: bold;
+            margin-bottom: 6px;
+        }
+        input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            box-sizing: border-box;
+            font-size: 16px;
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            background-color: #1a73e8;
+            color: white;
+            border: none;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            border-radius: 6px;
+            transition: background 0.2s;
+        }
+        button:hover {
+            background-color: #1557b0;
+        }
+        #bilderrahmen {
+            margin-top: 24px;
+            min-height: 350px;
+            background: #e8eaed;
+            border: 2px dashed #9aa0a6;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            overflow: hidden;
+            position: relative;
+        }
+        img {
+            max-width: 100%;
+            height: auto;
+            display: none;
+            border-radius: 6px;
+        }
+        #loading {
+            display: none;
+            color: #1a73e8;
+            font-weight: bold;
+        }
+        #placeholder {
+            color: #5f6368;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="card">
+        <h2>🎨 Stressfreier Generator (Referrer Fix)</h2>
+
+        <div class="input-group">
+            <label for="prompt">Was soll generiert werden?</label>
+            <input type="text" id="prompt" placeholder="Robot holding a red skateboard">
+        </div>
+
+        <button onclick="generateImage()">Bild generieren</button>
+
+        <div id="bilderrahmen">
+            <span id="placeholder">Dein Bild erscheint hier im Rahmen</span>
+            <span id="loading">Generiere Bild... ⏳</span>
+            <img id="resultImage" alt="Generiertes Bild">
+        </div>
+    </div>
+
+    <script>
+        function generateImage() {
+            const prompt = document.getElementById('prompt').value.trim();
+            const imgEl = document.getElementById('resultImage');
+            const loadingEl = document.getElementById('loading');
+            const placeholderEl = document.getElementById('placeholder');
+
+            if (!prompt) {
+                alert("Bitte einen Prompt eingeben!");
+                return;
+            }
+
+            // UI zurücksetzen
+            placeholderEl.style.display = 'none';
+            imgEl.style.display = 'none';
+            loadingEl.style.display = 'block';
+
+            const randomSeed = Math.floor(Math.random() * 100000);
+            const safePrompt = encodeURIComponent(prompt);
+            const imageUrl = `https://image.pollinations.ai/prompt/${safePrompt}?width=512&height=512&nologo=true&seed=${randomSeed}`;
+
+            // 1. WICHTIG: Referrer auf 'no-referrer' setzen, um localhost zu verstecken
+            imgEl.referrerPolicy = "no-referrer";
+            
+            // 2. Sicherstellen, dass kein 'crossorigin' Attribut stört (da wir nur anzeigen wollen)
+            imgEl.removeAttribute("crossorigin");
+
+            imgEl.onload = () => {
+                loadingEl.style.display = 'none';
+                imgEl.style.display = 'block';
+            };
+
+            imgEl.onerror = () => {
+                loadingEl.style.display = 'none';
+                placeholderEl.style.display = 'block';
+                placeholderEl.innerText = "Fehler beim Laden. Prüfe die Konsole (F12).";
+            };
+
+            // 3. Erst jetzt die URL zuweisen
+            imgEl.src = imageUrl;
+        }
+    </script>
+</body>
+</html>
