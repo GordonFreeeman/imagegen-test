@@ -31,7 +31,7 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y ninja-build glslc
+          sudo apt-get install -y ninja-build glslc spirv-headers
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager             "platforms;android-36"             "build-tools;36.0.0"             "ndk;28.2.13676358"             "cmake;3.31.6"
 
