@@ -290,3 +290,115 @@ The v1.2.0 APK is signed with persistent sideload certificate SHA-256:
 `6c4c89639285c16e367171b085115e436459644714eb81d4c22fd6e2164e879c`.
 
 Because v1.1.1 was signed by a different ephemeral GitHub Actions debug key, Android cannot update v1.1.1 in place. One final uninstall is required for the transition to v1.2.0. All future APKs signed with the persistent v1.2.0 key can update in place when versionCode increases.
+
+
+# v1.2.1 Progress Semantics / LoRA / Profile Cleanup Review
+
+Final reviewed implementation commit: `c5213f72ea790e8ccdf4b84481f7c08d7f63ec13`  
+Successful CI run: `33075469107`  
+APK version: 1.2.1 (versionCode 5), targetSdk 36, minSdk 29.
+
+## Iteration 1
+
+### Logic Inquisitor
+
+**Verdict:** REJECTED
+
+**Blocking findings:**
+
+1. The v1.2.0 progress callback conflated model tensor loading with diffusion sampling.
+   - Evidence/reproduction: stable-diffusion.cpp's `pretty_bytes_progress()` and `pretty_progress()` both call the same global `sd_progress_cb_t`. v1.2.0 registered the sampling callback before `new_sd_ctx()`, so tensor counts from model loading could appear as apparent denoising steps; completion of those tensor counters could then lead the UI into a misleading decode state.
+   - Expected behavior: model loading, lazy/runtime adapter loading, sampling and VAE decode must be distinct observable phases.
+   - Required correction: use a dedicated model-loading callback during context creation, only treat a callback as a sample step after the engine logs that sampling actually started, and enter decode only on the engine's latent-decoding log.
+   - Severity: High
+
+2. Profile-hidden component paths could still be passed to native inference.
+   - Evidence/reproduction: hiding CLIP-L/T5XXL for FLUX.2 did not clear their persisted paths, and the old generation call always forwarded every stored path.
+   - Expected behavior: changing profiles should preserve saved files for later reuse but pass only components relevant to the selected architecture.
+   - Required correction: compute profile-specific effective paths at generation time.
+   - Severity: High
+
+**Non-blocking improvements:**
+- Sampling-step detection still depends on stable-diffusion.cpp's current log wording plus expected step count. This is substantially safer than v1.2.0, but an upstream dedicated phase callback would be preferable if added later.
+
+**Verification performed:**
+- Inspected stable-diffusion.cpp `pretty_progress()`, `pretty_bytes_progress()`, model-loader tensor progress, sampler start/completion logs, and latent-decode logs at the pinned runtime commit.
+- Inspected the complete JNI callback state machine and profile-to-native component mapping.
+
+### Aesthetic Executioner
+
+**Verdict:** APPROVED
+
+**Blocking findings:**
+- None.
+
+**Non-blocking improvements:**
+- Four LoRA rows lengthen the Models tab, but they remain inside the existing vertical ScrollView and keep the Create screen uncluttered.
+
+**Verification performed:**
+- Inspected the complete Models and Create screen code.
+- Checked FLUX.2 hiding of Full checkpoint / CLIP-L / T5XXL, FLUX.1 hiding of Full checkpoint / LLM, and generic-profile visibility.
+- Checked each LoRA row's fixed button widths, flexible label width, strength slider and filename line for narrow mobile layouts.
+- No Android emulator or physical-device renderer was available in the build environment.
+
+## Iteration 2 — Final
+
+### Logic Inquisitor
+
+**Verdict:** APPROVED
+
+**Blocking findings:**
+- None.
+
+**Non-blocking improvements:**
+- Real-device timing will determine whether the safe CPU VAE backend is acceptably fast; the corrected phase display now makes that measurement meaningful.
+- LoRA compatibility is architecture-dependent and cannot be inferred reliably from arbitrary filenames, so incompatible LoRAs are allowed to fail through the engine rather than being falsely classified by the UI.
+
+**Verification performed:**
+- Verified context/model loading uses a dedicated `load_progress_cb` and exposes true tensor X/Y progress.
+- Verified sampling callback is installed only after context creation.
+- Verified actual sampler start is gated by the engine's `sampling using ... method` log and requested sampling-step count.
+- Verified runtime/lazy tensor progress is reported separately as conditioning/adapter loading.
+- Verified VAE decode is entered only after the engine logs that latent decoding has begun; last sample step no longer guesses that decode started.
+- Verified optional projected live previews remain wired through `sd_set_preview_callback`.
+- Verified four runtime LoRA slots:
+  - copied to app-private storage,
+  - independent 0.00–2.00 multipliers,
+  - passed as `sd_lora_t` arrays,
+  - `LORA_APPLY_AT_RUNTIME` enabled,
+  - no base-model context reload required when changing a LoRA.
+- Verified FLUX.2 profiles pass diffusion + VAE + LLM only; CLIP-L, T5XXL and Full checkpoint are hidden and not forwarded.
+- Verified FLUX.1 profiles retain CLIP-L/T5XXL and omit LLM/full-checkpoint inputs.
+- Verified generic/auto profiles retain Full checkpoint capability because it can represent smaller self-contained SD/SDXL/other supported checkpoints, not only huge original FLUX weights.
+- Verified versionCode 5 / versionName 1.2.1 and persistent signing certificate are unchanged from v1.2.0.
+- GitHub Actions run 33075469107 passed native/Java compilation, lint, APK assembly, targetSdk 36 metadata, 16 KB alignment, version checks and signer fingerprint verification.
+
+### Aesthetic Executioner
+
+**Verdict:** APPROVED
+
+**Blocking findings:**
+- None.
+
+**Verification performed:**
+- Re-inspected the complete final Models/Create UI after profile-aware visibility and LoRA additions.
+- Confirmed irrelevant FLUX.2 controls disappear rather than leaving disabled clutter.
+- Confirmed LoRA controls remain grouped under Models and preserve the existing visual hierarchy.
+- Confirmed progress text now distinguishes model tensors, lazy tensors/adapters, sampling, sampling-complete/pre-decode, and actual decode.
+- Android resource compilation and lint passed.
+- No emulator or physical-device rendering was available, so the visual verdict is based on source/resource inspection rather than a fabricated device screenshot.
+
+## Final status
+
+Both reviewers approved the same v1.2.1 implementation at commit `c5213f72ea790e8ccdf4b84481f7c08d7f63ec13`. The subsequent commit adding this review record changes documentation only.
+
+CI run `33075469107` verified:
+- package `com.localflux.studio`
+- versionCode `5`
+- versionName `1.2.1`
+- compileSdk / targetSdk `36`
+- minSdk `29`
+- 16 KB alignment
+- persistent sideload signer SHA-256 `6c4c89639285c16e367171b085115e436459644714eb81d4c22fd6e2164e879c`
+
+Because v1.2.1 uses the same signer as v1.2.0 and has a higher versionCode, Android can install it directly over v1.2.0 while preserving app-private model files and settings.
