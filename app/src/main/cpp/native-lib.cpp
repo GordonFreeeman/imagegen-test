@@ -77,8 +77,7 @@ void reset_progress_state() {
 void progress_cb(int step, int steps, float, void*) {
     const int safe_steps = std::max(0, steps);
     const int safe_step = std::max(0, std::min(step, safe_steps > 0 ? safe_steps : step));
-    set_phase((safe_steps > 0 && safe_step >= safe_steps) ? PHASE_DECODING : PHASE_SAMPLING,
-              safe_step, safe_steps);
+    set_phase(PHASE_SAMPLING, safe_step, safe_steps);
 }
 
 void preview_cb(int step, int frame_count, sd_image_t* frames, bool, void*) {
@@ -121,9 +120,9 @@ void android_log_cb(enum sd_log_level_t level, const char* text, void*) {
         std::transform(lower.begin(), lower.end(), lower.begin(),
                        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
         const int phase = g_phase.load();
-        if (phase >= PHASE_CONDITIONING && phase <= PHASE_DECODING &&
-            lower.find("decode") != std::string::npos &&
-            (lower.find("vae") != std::string::npos || lower.find("first_stage") != std::string::npos)) {
+        if (phase >= PHASE_CONDITIONING && phase <= PHASE_SAMPLING &&
+            lower.find("decoding") != std::string::npos &&
+            lower.find("latent") != std::string::npos) {
             const int total = g_steps.load();
             set_phase(PHASE_DECODING, total, total);
         }
@@ -199,6 +198,7 @@ sd_ctx_t* ensure_context(
     p.n_threads = std::max(2, std::min(8, sd_get_num_physical_cores()));
     p.enable_mmap = true;
     p.eager_load = false;
+    p.lora_apply_mode = LORA_APPLY_AT_RUNTIME;
 
     const bool split_model = !diffusion.empty();
     if (split_model) {
@@ -289,7 +289,9 @@ Java_com_localflux_studio_MainActivity_nativeGenerate(
         jlong seed,
         jboolean vaeTiling,
         jboolean livePreview,
-        jint previewInterval) {
+        jint previewInterval,
+        jobjectArray jLoraPaths,
+        jfloatArray jLoraStrengths) {
 
     std::call_once(g_log_once, [] {
         sd_set_log_callback(android_log_cb, nullptr);
@@ -306,6 +308,28 @@ Java_com_localflux_studio_MainActivity_nativeGenerate(
     const std::string prompt = from_jstring(env, jPrompt);
     const std::string negative = from_jstring(env, jNegative);
 
+    std::vector<std::string> lora_paths;
+    std::vector<float> lora_strengths;
+    if (jLoraPaths != nullptr && jLoraStrengths != nullptr) {
+        const jsize path_count = env->GetArrayLength(jLoraPaths);
+        const jsize strength_count = env->GetArrayLength(jLoraStrengths);
+        const jsize count = std::min(path_count, strength_count);
+        std::vector<jfloat> strengths(static_cast<size_t>(count));
+        if (count > 0) {
+            env->GetFloatArrayRegion(jLoraStrengths, 0, count, strengths.data());
+        }
+        for (jsize i = 0; i < count; ++i) {
+            auto value = static_cast<jstring>(env->GetObjectArrayElement(jLoraPaths, i));
+            std::string path = from_jstring(env, value);
+            env->DeleteLocalRef(value);
+            if (path.empty()) continue;
+            const float strength = std::max(-2.0f, std::min(2.0f, static_cast<float>(strengths[static_cast<size_t>(i)])));
+            if (std::abs(strength) < 0.0001f) continue;
+            lora_paths.push_back(std::move(path));
+            lora_strengths.push_back(strength);
+        }
+    }
+
     if (prompt.empty()) {
         throw_runtime(env, "Prompt is empty.");
         return nullptr;
@@ -321,14 +345,11 @@ Java_com_localflux_studio_MainActivity_nativeGenerate(
     }
 
     reset_progress_state();
-    sd_set_progress_callback(progress_cb, nullptr);
-    if (livePreview == JNI_TRUE) {
-        sd_set_preview_callback(preview_cb, PREVIEW_PROJ,
-                                std::max(1, std::min(8, static_cast<int>(previewInterval))),
-                                true, false, nullptr);
-    } else {
-        sd_set_preview_callback(nullptr, PREVIEW_NONE, 1, true, false, nullptr);
-    }
+
+    // stable-diffusion.cpp also uses the global progress callback while loading model tensors.
+    // Keep it disabled during context creation so tensor counts cannot be mistaken for sampling steps.
+    sd_set_progress_callback(nullptr, nullptr);
+    sd_set_preview_callback(nullptr, PREVIEW_NONE, 1, true, false, nullptr);
 
     sd_ctx_t* ctx = ensure_context(env, model, diffusion, vae, clipL, t5, llm);
     if (!ctx || env->ExceptionCheck()) {
@@ -337,6 +358,14 @@ Java_com_localflux_studio_MainActivity_nativeGenerate(
     }
 
     set_phase(PHASE_CONDITIONING, 0, steps);
+    sd_set_progress_callback(progress_cb, nullptr);
+    if (livePreview == JNI_TRUE) {
+        sd_set_preview_callback(preview_cb, PREVIEW_PROJ,
+                                std::max(1, std::min(8, static_cast<int>(previewInterval))),
+                                true, false, nullptr);
+    } else {
+        sd_set_preview_callback(nullptr, PREVIEW_NONE, 1, true, false, nullptr);
+    }
     sd_cancel_generation(ctx, SD_CANCEL_RESET);
 
     sd_img_gen_params_t gp;
@@ -351,6 +380,18 @@ Java_com_localflux_studio_MainActivity_nativeGenerate(
     gp.sample_params.guidance.txt_cfg = textCfg;
     gp.sample_params.guidance.distilled_guidance = distilledGuidance;
     gp.vae_tiling_params.enabled = (vaeTiling == JNI_TRUE);
+
+    std::vector<sd_lora_t> loras;
+    loras.reserve(lora_paths.size());
+    for (size_t i = 0; i < lora_paths.size(); ++i) {
+        sd_lora_t lora{};
+        lora.is_high_noise = false;
+        lora.multiplier = lora_strengths[i];
+        lora.path = lora_paths[i].c_str();
+        loras.push_back(lora);
+    }
+    gp.loras = loras.empty() ? nullptr : loras.data();
+    gp.lora_count = static_cast<uint32_t>(loras.size());
 
     if (gp.sample_params.sample_method == SAMPLE_METHOD_COUNT) {
         gp.sample_params.sample_method = sd_get_default_sample_method(ctx);
