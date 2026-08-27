@@ -230,6 +230,31 @@ const char* c_or_null(const std::string& s) {
     return s.empty() ? nullptr : s.c_str();
 }
 
+struct TextEncoderStrategy {
+    int min_tokens;
+    bool early_layers;
+    bool gpu;
+    bool disk;
+    const char* label;
+};
+
+TextEncoderStrategy text_encoder_strategy(int mode) {
+    switch (std::max(0, std::min(10, mode))) {
+        case 0: return {24,  false, false, false, "cpu-min24"};
+        case 1: return {0,   false, false, false, "cpu-real-tokens"};
+        case 2: return {24,  true,  false, false, "cpu-ultra-early18"};
+        case 3: return {32,  false, false, false, "cpu-min32"};
+        case 4: return {64,  false, false, false, "cpu-min64"};
+        case 5: return {128, false, false, false, "cpu-min128"};
+        case 6: return {512, false, false, false, "cpu-full512"};
+        case 7: return {32,  false, true,  false, "vulkan-min32-experimental"};
+        case 8: return {64,  false, true,  false, "vulkan-min64-experimental"};
+        case 9: return {512, false, true,  false, "vulkan-full512-experimental"};
+        case 10:return {512, false, false, true,  "cpu-disk-full512"};
+        default:return {24,  false, false, false, "cpu-min24"};
+    }
+}
+
 std::string make_key(
         const std::string& model,
         const std::string& diffusion,
@@ -237,9 +262,11 @@ std::string make_key(
         const std::string& clipL,
         const std::string& t5,
         const std::string& llm,
-        int te_mode) {
+        int te_mode,
+        int n_threads) {
     return model + "\n" + diffusion + "\n" + vae + "\n" + clipL + "\n" + t5 + "\n" + llm +
-           "\nmobile-safe-v5-te-mode-" + std::to_string(te_mode);
+           "\nmobile-safe-v6-te-mode-" + std::to_string(te_mode) +
+           "\nthreads-" + std::to_string(n_threads);
 }
 
 sd_ctx_t* ensure_context(
@@ -250,23 +277,30 @@ sd_ctx_t* ensure_context(
         const std::string& clipL,
         const std::string& t5,
         const std::string& llm,
-        int te_mode) {
+        int te_mode,
+        int requested_threads) {
 
-    te_mode = std::max(0, std::min(4, te_mode));
+    te_mode = std::max(0, std::min(10, te_mode));
+    const TextEncoderStrategy strategy = text_encoder_strategy(te_mode);
 
-    // The pinned FLUX.2 Klein conditioner normally runs Qwen on a full 512-token
-    // padded sequence. LocalFlux patches the vendored conditioner so modes 0/1
-    // can do the expensive Qwen pass on 64/128 minimum tokens and zero-pad the
-    // resulting hidden states back to 512 before diffusion.
-    const char* klein_cond_mode = te_mode == 0 ? "0" : (te_mode == 1 ? "1" : "2");
-    setenv("LOCALFLUX_KLEIN_COND_MODE", klein_cond_mode, 1);
+    int detected_threads = sd_get_num_physical_cores();
+    if (detected_threads <= 0) detected_threads = 4;
+    const int effective_threads = requested_threads > 0
+            ? std::max(2, std::min(8, requested_threads))
+            : std::max(2, std::min(8, detected_threads));
+
+    char min_tokens[16];
+    std::snprintf(min_tokens, sizeof(min_tokens), "%d", strategy.min_tokens);
+    setenv("LOCALFLUX_KLEIN_MIN_TOKENS", min_tokens, 1);
+    setenv("LOCALFLUX_KLEIN_EARLY_LAYERS", strategy.early_layers ? "1" : "0", 1);
 
     // Model files are mmap-backed. Sequential access is a safe Android/Linux
     // read-ahead hint and reduces first-run page-fault stalls without pinning
-    // the entire multi-gigabyte stack in memory.
+    // the entire multi-gigabyte stack in anonymous memory.
     setenv("SD_MMAP_FLAGS", "sequential", 1);
 
-    const std::string key = make_key(model, diffusion, vae, clipL, t5, llm, te_mode);
+    const std::string key = make_key(model, diffusion, vae, clipL, t5, llm,
+                                     te_mode, effective_threads);
     std::lock_guard<std::mutex> lock(g_ctx_mutex);
 
     if (g_ctx && g_ctx_key == key) {
@@ -292,56 +326,47 @@ sd_ctx_t* ensure_context(
     p.clip_l_path = c_or_null(clipL);
     p.t5xxl_path = c_or_null(t5);
     p.llm_path = c_or_null(llm);
-    p.n_threads = std::max(2, std::min(8, sd_get_num_physical_cores()));
+    p.n_threads = effective_threads;
     p.enable_mmap = true;
     p.eager_load = false;
     p.lora_apply_mode = LORA_APPLY_AT_RUNTIME;
 
     const bool split_model = !diffusion.empty();
     if (split_model) {
-        // Mobile-safe policy for FLUX-class split stacks:
-        // - diffusion stays on Vulkan with CPU-backed streamed parameters
-        // - Qwen defaults to optimized CPU because the current Adreno 830 path can crash
-        // - fast/balanced Klein modes reduce Qwen's pre-padding cost but keep the final
-        //   512-position conditioning tensor required by the diffusion pipeline
-        // - reference CPU, Vulkan and disk modes preserve the original 512-token path
-        //
-        // Text encoder modes:
-        // 0 = CPU + adaptive 64-token Klein minimum (recommended)
-        // 1 = CPU + adaptive 128-token Klein minimum (balanced)
-        // 2 = CPU + upstream full 512-token Klein conditioning (reference)
-        // 3 = Vulkan text encoder + full 512 tokens (experimental; may crash Adreno)
-        // 4 = CPU + disk-backed params + full 512 tokens (minimum RAM, very slow)
-        if (te_mode == 3) {
+        // Diffusion stays on Vulkan with CPU-backed streamed parameters.
+        // Qwen can run on optimized CPU, experimental Vulkan, or disk-backed
+        // CPU according to the selected strategy.
+        if (strategy.gpu) {
             p.backend = "diffusion=gpu,te=gpu,vae=cpu";
             p.params_backend = "diffusion=cpu,te=cpu,vae=cpu";
-        } else if (te_mode == 4) {
+        } else if (strategy.disk) {
             p.backend = "diffusion=gpu,te=cpu,vae=cpu";
             p.params_backend = "diffusion=cpu,te=disk,vae=cpu";
         } else {
             p.backend = "diffusion=gpu,te=cpu,vae=cpu";
             p.params_backend = "diffusion=cpu,te=cpu,vae=cpu";
         }
+
         p.max_vram = "-1";
         p.stream_layers = true;
         p.auto_fit = false;
 
-        // CPU Qwen keeps flash attention. Disable it only for the experimental
-        // Vulkan text-encoder path where the vendor driver was unstable.
-        p.flash_attn = te_mode != 3;
+        // CPU Qwen keeps flash attention. The current Adreno path is more stable
+        // with TE flash attention disabled in experimental Vulkan modes.
+        p.flash_attn = !strategy.gpu;
         p.diffusion_flash_attn = false;
 
-        const char* te_runtime = te_mode == 3 ? "gpu-experimental" : "cpu-armv8.6";
-        const char* te_params = te_mode == 4 ? "disk" : "cpu";
-        const char* cond_mode = te_mode == 0 ? "klein-qwen-min64"
-                              : te_mode == 1 ? "klein-qwen-min128"
-                              : "klein-qwen-full512";
-        char mode_line[384];
+        const char* te_runtime = strategy.gpu ? "gpu-experimental" : "cpu-armv8.6";
+        const char* te_params = strategy.disk ? "disk" : "cpu";
+        char mode_line[512];
         std::snprintf(mode_line, sizeof(mode_line),
                       "Loading split-model context "
-                      "(diffusion=gpu, te=%s, vae=cpu, params diffusion=cpu te=%s, %s, mmap=sequential, "
-                      "max_vram=-1, stream_layers=1; TE runner buffers released after conditioning)",
-                      te_runtime, te_params, cond_mode);
+                      "(diffusion=gpu, te=%s, vae=cpu, params diffusion=cpu te=%s, strategy=%s, "
+                      "qwen_min=%d, states=%s, threads=%d, mmap=sequential, max_vram=-1, stream_layers=1; "
+                      "TE runner buffers released after conditioning)",
+                      te_runtime, te_params, strategy.label, strategy.min_tokens,
+                      strategy.early_layers ? "6/12/18" : "9/18/27",
+                      effective_threads);
         push_console_log(SD_LOG_INFO, mode_line);
         __android_log_print(ANDROID_LOG_INFO, TAG, "%s", mode_line);
     } else {
@@ -349,10 +374,14 @@ sd_ctx_t* ensure_context(
         p.auto_fit = true;
         p.flash_attn = true;
         p.diffusion_flash_attn = true;
-        push_console_log(SD_LOG_INFO, "Loading full-checkpoint context (mmap + flash attention + auto-fit)");
-        __android_log_print(ANDROID_LOG_INFO, TAG,
-                            "Loading full-checkpoint context (mmap + flash attention + auto-fit)");
+        char mode_line[192];
+        std::snprintf(mode_line, sizeof(mode_line),
+                      "Loading full-checkpoint context (mmap + flash attention + auto-fit, threads=%d)",
+                      effective_threads);
+        push_console_log(SD_LOG_INFO, mode_line);
+        __android_log_print(ANDROID_LOG_INFO, TAG, "%s", mode_line);
     }
+
     g_ctx = new_sd_ctx(&p);
     if (!g_ctx) {
         throw_runtime(env, split_model
@@ -382,7 +411,7 @@ Java_com_localflux_studio_MainActivity_nativeSystemInfo(JNIEnv* env, jclass) {
 
     std::string out = sd_get_system_info() ? sd_get_system_info() : "stable-diffusion.cpp";
     out += "\nCPU target: ARMv8.6 + DOTPROD + I8MM; KleidiAI enabled for Q4_0/Q8_0";
-    out += "\nKlein conditioning: adaptive 64/128-token Qwen modes + upstream 512-token reference";
+    out += "\nKlein conditioning: real/24/32/64/128/512-token modes + optional early 6/12/18 states";
     const size_t n = sd_list_devices(nullptr, 0);
     if (n > 0) {
         std::vector<char> buf(n + 1, 0);
@@ -416,7 +445,8 @@ Java_com_localflux_studio_MainActivity_nativeGenerate(
         jint previewInterval,
         jobjectArray jLoraPaths,
         jfloatArray jLoraStrengths,
-        jint textEncoderMode) {
+        jint textEncoderMode,
+        jint cpuThreads) {
 
     std::call_once(g_log_once, [] {
         sd_set_log_callback(android_log_cb, nullptr);
@@ -479,7 +509,8 @@ Java_com_localflux_studio_MainActivity_nativeGenerate(
     sd_set_preview_callback(nullptr, PREVIEW_NONE, 1, true, false, nullptr);
 
     sd_ctx_t* ctx = ensure_context(env, model, diffusion, vae, clipL, t5, llm,
-                                  static_cast<int>(textEncoderMode));
+                                  static_cast<int>(textEncoderMode),
+                                  static_cast<int>(cpuThreads));
     if (!ctx || env->ExceptionCheck()) {
         set_phase(PHASE_ERROR);
         return nullptr;
