@@ -698,7 +698,7 @@ public class MainActivity extends Activity {
                 "CPU Sprint · min 64 · states 9/18/27",
                 "CPU Balanced · min 128 · states 9/18/27",
                 "CPU Reference · full 512 · states 9/18/27",
-                "Vulkan Safe · min 24 · 0.90 GiB streamed · recommended",
+                "Vulkan Stream · min 24 · 0.90 GiB · diagnostic",
                 "Vulkan Balanced · min 32 · 1.25 GiB streamed",
                 "Vulkan Reference · full 512 · 1.25 GiB streamed",
                 "CPU + disk · full 512 · emergency",
@@ -753,7 +753,7 @@ public class MainActivity extends Activity {
             @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
                 prefs.edit()
                         .putInt("text_encoder_mode", Math.max(0, Math.min(15, position)))
-                        .putInt("text_encoder_mode_schema", 5)
+                        .putInt("text_encoder_mode_schema", 6)
                         .apply();
             }
             @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
