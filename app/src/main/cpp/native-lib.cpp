@@ -120,7 +120,9 @@ void android_log_cb(enum sd_log_level_t level, const char* text, void*) {
         std::string lower(text);
         std::transform(lower.begin(), lower.end(), lower.begin(),
                        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-        if (lower.find("decode") != std::string::npos &&
+        const int phase = g_phase.load();
+        if (phase >= PHASE_CONDITIONING && phase <= PHASE_DECODING &&
+            lower.find("decode") != std::string::npos &&
             (lower.find("vae") != std::string::npos || lower.find("first_stage") != std::string::npos)) {
             const int total = g_steps.load();
             set_phase(PHASE_DECODING, total, total);
