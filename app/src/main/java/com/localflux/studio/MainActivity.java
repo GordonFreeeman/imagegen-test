@@ -58,23 +58,37 @@ public class MainActivity extends Activity {
     private static native String nativeSystemInfo();
     private static native int[] nativeGenerate(
             String model, String diffusion, String vae, String clipL, String t5, String llm,
-            String prompt, String negative, int width, int height, int steps, float guidance,
-            long seed, boolean vaeTiling);
+            String prompt, String negative, int width, int height, int steps,
+            float textCfg, float distilledGuidance, long seed, boolean vaeTiling);
     private static native void nativeCancel();
     private static native void nativeUnload();
 
-    private static final int BG = Color.rgb(9, 10, 16);
-    private static final int CARD = Color.rgb(20, 22, 31);
-    private static final int CARD_2 = Color.rgb(27, 29, 41);
-    private static final int TEXT = Color.rgb(241, 242, 248);
-    private static final int MUTED = Color.rgb(169, 174, 194);
-    private static final int ACCENT = Color.rgb(141, 103, 255);
-    private static final int ACCENT_2 = Color.rgb(82, 203, 190);
+    private static final int BG = Color.rgb(8, 8, 14);
+    private static final int BG_2 = Color.rgb(20, 14, 31);
+    private static final int CARD = Color.rgb(22, 21, 33);
+    private static final int CARD_2 = Color.rgb(31, 29, 46);
+    private static final int TEXT = Color.rgb(246, 245, 252);
+    private static final int MUTED = Color.rgb(176, 178, 198);
+    private static final int ACCENT = Color.rgb(150, 108, 255);
+    private static final int ACCENT_2 = Color.rgb(91, 218, 196);
+    private static final int GOLD = Color.rgb(255, 193, 105);
     private static final int DANGER = Color.rgb(238, 98, 112);
 
     private static final int REQ_MODEL = 1001;
     private static final int REQ_SOURCE = 1002;
     private static final int REQ_TARGET = 1003;
+
+    private static final String[] MODEL_PROFILES = {
+            "Auto / custom",
+            "FLUX.2 Klein 4B · recommended",
+            "FLUX.2 Klein Base 4B · quality",
+            "FLUX.2 Klein 9B · experimental",
+            "FLUX.2 Klein Base 9B · quality / heavy",
+            "FLUX.2 Dev 32B · impractical on 16 GB",
+            "FLUX.1 Krea / Dev",
+            "FLUX.1 Schnell",
+            "Other stable-diffusion.cpp model"
+    };
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private SharedPreferences prefs;
@@ -88,8 +102,10 @@ public class MainActivity extends Activity {
     private Spinner sizeSpinner;
     private SeekBar stepsBar;
     private TextView stepsValue;
-    private SeekBar guidanceBar;
-    private TextView guidanceValue;
+    private SeekBar cfgBar;
+    private TextView cfgValue;
+    private SeekBar distilledBar;
+    private TextView distilledValue;
     private EditText seedInput;
     private CheckBox vaeTilingCheck;
     private Button generateButton;
@@ -98,6 +114,15 @@ public class MainActivity extends Activity {
     private TextView status;
     private ImageView resultImage;
     private Button saveButton;
+    private Spinner profileSpinner;
+    private TextView profileInfo;
+    private TextView modelSummary;
+    private LinearLayout generationCard;
+    private LinearLayout modelCard;
+    private LinearLayout faceCard;
+    private Button createTab;
+    private Button modelsTab;
+    private Button faceTab;
 
     private Bitmap currentBitmap;
     private Bitmap sourceBitmap;
@@ -121,7 +146,7 @@ public class MainActivity extends Activity {
         prefs = getSharedPreferences("models", MODE_PRIVATE);
 
         roleLabels.put("model", "Full checkpoint");
-        roleLabels.put("diffusion", "FLUX diffusion / transformer");
+        roleLabels.put("diffusion", "Diffusion / transformer");
         roleLabels.put("vae", "VAE / AE");
         roleLabels.put("clip_l", "CLIP-L");
         roleLabels.put("t5", "T5XXL");
@@ -141,53 +166,118 @@ public class MainActivity extends Activity {
     private View buildUi() {
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
-        scroll.setBackgroundColor(BG);
+        scroll.setBackground(backgroundGradient());
 
         LinearLayout root = column();
-        root.setPadding(dp(18), dp(24), dp(18), dp(48));
+        root.setPadding(dp(18), dp(22), dp(18), dp(52));
         scroll.addView(root);
 
-        TextView eyebrow = text("LOCAL · PRIVATE · ARM64", 12, ACCENT_2, true);
-        eyebrow.setLetterSpacing(0.14f);
-        root.addView(eyebrow);
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
 
-        TextView hero = text("Local Flux Studio", 32, TEXT, true);
-        hero.setPadding(0, dp(5), 0, 0);
-        root.addView(hero);
+        ImageView logo = new ImageView(this);
+        logo.setImageResource(com.localflux.studio.R.mipmap.ic_launcher);
+        logo.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        header.addView(logo, new LinearLayout.LayoutParams(dp(64), dp(64)));
 
-        TextView sub = text("FLUX-class image generation and self-face swapping, entirely on your phone.", 16, MUTED, false);
-        sub.setPadding(0, dp(6), 0, dp(18));
-        root.addView(sub);
+        LinearLayout titles = column();
+        LinearLayout.LayoutParams titlesLp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        titlesLp.setMarginStart(dp(12));
+        TextView eyebrow = text("ON-DEVICE CREATIVE AI", 11, ACCENT_2, true);
+        eyebrow.setLetterSpacing(0.12f);
+        titles.addView(eyebrow);
+        TextView hero = text("Local Flux Studio", 29, TEXT, true);
+        hero.setPadding(0, dp(2), 0, 0);
+        titles.addView(hero);
+        titles.addView(text("Private generation · modern model stacks · self face swap", 13, MUTED, false));
+        header.addView(titles, titlesLp);
+        root.addView(header);
 
-        TextView runtime = text(nativeSystemInfo(), 11, MUTED, false);
-        runtime.setTypeface(Typeface.MONOSPACE);
-        runtime.setPadding(dp(12), dp(10), dp(12), dp(10));
-        runtime.setBackground(roundRect(Color.rgb(15, 17, 24), 14, Color.rgb(47, 52, 68)));
-        root.addView(runtime, matchWrap());
+        LinearLayout chips = new LinearLayout(this);
+        chips.setOrientation(LinearLayout.HORIZONTAL);
+        chips.setPadding(0, dp(14), 0, dp(16));
+        chips.addView(chip("VULKAN"));
+        LinearLayout.LayoutParams chipGap = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        chipGap.setMarginStart(dp(7));
+        chips.addView(chip("100% LOCAL"), chipGap);
+        LinearLayout.LayoutParams chipGap2 = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        chipGap2.setMarginStart(dp(7));
+        chips.addView(chip("SDK 36"), chipGap2);
+        root.addView(chips);
 
-        root.addView(space(18));
-        root.addView(buildModelCard());
-        root.addView(space(14));
-        root.addView(buildGenerationCard());
-        root.addView(space(14));
-        root.addView(buildFaceCard());
+        HorizontalScrollView navScroll = new HorizontalScrollView(this);
+        navScroll.setHorizontalScrollBarEnabled(false);
+        LinearLayout nav = new LinearLayout(this);
+        nav.setOrientation(LinearLayout.HORIZONTAL);
+        nav.setPadding(dp(3), dp(3), dp(3), dp(3));
+        nav.setBackground(roundRect(Color.rgb(16, 15, 25), 17, Color.rgb(47, 42, 66)));
+
+        createTab = tabButton("Create");
+        modelsTab = tabButton("Models");
+        faceTab = tabButton("Face swap");
+        createTab.setOnClickListener(v -> switchTab(0));
+        modelsTab.setOnClickListener(v -> switchTab(1));
+        faceTab.setOnClickListener(v -> switchTab(2));
+        nav.addView(createTab, new LinearLayout.LayoutParams(dp(112), dp(46)));
+        nav.addView(modelsTab, new LinearLayout.LayoutParams(dp(112), dp(46)));
+        nav.addView(faceTab, new LinearLayout.LayoutParams(dp(118), dp(46)));
+        navScroll.addView(nav);
+        root.addView(navScroll, matchWrap());
+
+        root.addView(space(16));
+
+        // Build Create first so model presets can safely tune its sampling controls.
+        generationCard = (LinearLayout) buildGenerationCard();
+        modelCard = (LinearLayout) buildModelCard();
+        faceCard = (LinearLayout) buildFaceCard();
+
+        root.addView(generationCard);
+        root.addView(modelCard);
+        root.addView(faceCard);
 
         TextView footer = text(
-                "No prompt, photo, embedding, or generated image is uploaded by this app. Internet access is only used when you explicitly install the optional face models.",
-                12, MUTED, false);
+                "Your prompts, source photos, face embeddings and generated images stay on this device. Network access is only used when you explicitly install optional face models.",
+                11, MUTED, false);
         footer.setPadding(dp(4), dp(18), dp(4), 0);
         root.addView(footer);
 
+        switchTab(0);
         return scroll;
     }
 
     private View buildModelCard() {
         LinearLayout card = card();
-        card.addView(sectionTitle("1 · Model stack"));
+        card.addView(sectionTitle("Model library"));
         card.addView(text(
-                "Use a full checkpoint, or a split FLUX stack. For typical FLUX.1 GGUF: diffusion + VAE + CLIP-L + T5XXL. Qwen/LLM is optional and intended for architectures that require it.",
+                "The engine auto-detects architecture. Profiles below simply tell the UI which files belong together and apply sensible sampling defaults.",
                 13, MUTED, false));
-        card.addView(space(10));
+
+        card.addView(fieldLabel("Model profile"));
+        profileSpinner = styledSpinner(MODEL_PROFILES);
+        card.addView(profileSpinner, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(54)));
+
+        profileInfo = text("", 12, TEXT, false);
+        profileInfo.setPadding(dp(13), dp(11), dp(13), dp(11));
+        profileInfo.setBackground(roundRect(Color.rgb(27, 23, 42), 14, Color.rgb(75, 61, 105)));
+        LinearLayout.LayoutParams profileLp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        profileLp.topMargin = dp(9);
+        card.addView(profileInfo, profileLp);
+
+        profileSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
+                prefs.edit().putInt("model_profile", position).apply();
+                applyProfile(position, true);
+            }
+            @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
+        });
+        int savedProfile = Math.max(0, Math.min(MODEL_PROFILES.length - 1, prefs.getInt("model_profile", 1)));
+        profileSpinner.setSelection(savedProfile);
+
+        TextView filesTitle = text("MODEL FILES", 11, ACCENT_2, true);
+        filesTitle.setLetterSpacing(0.1f);
+        filesTitle.setPadding(0, dp(18), 0, dp(3));
+        card.addView(filesTitle);
 
         for (Map.Entry<String, String> entry : roleLabels.entrySet()) {
             String role = entry.getKey();
@@ -203,8 +293,7 @@ public class MainActivity extends Activity {
 
             Button choose = secondaryButton("Import");
             choose.setOnClickListener(v -> chooseModel(role));
-            line.addView(choose, new LinearLayout.LayoutParams(dp(94), dp(42)));
-
+            line.addView(choose, new LinearLayout.LayoutParams(dp(92), dp(42)));
             row.addView(line);
 
             TextView value = text("Not selected", 12, MUTED, false);
@@ -218,56 +307,64 @@ public class MainActivity extends Activity {
         LinearLayout actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.HORIZONTAL);
         actions.setGravity(Gravity.CENTER_VERTICAL);
-        actions.setPadding(0, dp(8), 0, 0);
+        actions.setPadding(0, dp(10), 0, 0);
 
         Button unload = secondaryButton("Unload RAM");
         unload.setOnClickListener(v -> {
             nativeUnload();
-            toast("Loaded diffusion context released from RAM.");
+            toast("Loaded inference context released from RAM.");
         });
-        actions.addView(unload, new LinearLayout.LayoutParams(0, dp(46), 1f));
+        actions.addView(unload, new LinearLayout.LayoutParams(0, dp(47), 1f));
 
         Button clear = secondaryButton("Clear paths");
         clear.setOnClickListener(v -> confirmClearModels());
-        LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(0, dp(46), 1f);
+        LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(0, dp(47), 1f);
         cp.setMarginStart(dp(8));
         actions.addView(clear, cp);
         card.addView(actions);
+
+        TextView runtimeTitle = text("RUNTIME", 11, GOLD, true);
+        runtimeTitle.setLetterSpacing(0.1f);
+        runtimeTitle.setPadding(0, dp(18), 0, dp(5));
+        card.addView(runtimeTitle);
+
+        TextView runtime = text(nativeSystemInfo(), 10, MUTED, false);
+        runtime.setTypeface(Typeface.MONOSPACE);
+        runtime.setPadding(dp(12), dp(10), dp(12), dp(10));
+        runtime.setBackground(roundRect(Color.rgb(13, 13, 21), 13, Color.rgb(49, 46, 65)));
+        card.addView(runtime, matchWrap());
 
         return card;
     }
 
     private View buildGenerationCard() {
         LinearLayout card = card();
-        card.addView(sectionTitle("2 · Generate"));
+        card.addView(sectionTitle("Create"));
+
+        modelSummary = text("No model configured", 12, TEXT, true);
+        modelSummary.setPadding(dp(12), dp(9), dp(12), dp(9));
+        modelSummary.setBackground(roundRect(Color.rgb(35, 29, 53), 14, Color.rgb(79, 62, 116)));
+        card.addView(modelSummary, matchWrap());
 
         card.addView(fieldLabel("Prompt"));
         promptInput = input(4);
-        promptInput.setHint("dark fantasy knight beneath a blood-red eclipse, intricate armor, dramatic chiaroscuro…");
+        promptInput.setHint("dark fantasy knight beneath a blood-red eclipse, intricate armor, cinematic chiaroscuro…");
         card.addView(promptInput);
 
-        card.addView(fieldLabel("Negative prompt (optional)"));
+        card.addView(fieldLabel("Negative prompt · optional"));
         negativeInput = input(2);
-        negativeInput.setHint("low quality, artifacts, extra fingers…");
+        negativeInput.setHint("low quality, artifacts, malformed anatomy…");
         card.addView(negativeInput);
 
-        TextView sizeLabel = fieldLabel("Canvas");
-        card.addView(sizeLabel);
-        sizeSpinner = new Spinner(this);
-        String[] sizes = {"512 × 512", "640 × 640", "768 × 768", "896 × 896", "1024 × 1024"};
-        ArrayAdapter<String> adapter = new ArrayAdapter<String>(this, android.R.layout.simple_spinner_dropdown_item, sizes) {
-            @Override public View getView(int position, View convertView, android.view.ViewGroup parent) {
-                TextView v = (TextView) super.getView(position, convertView, parent);
-                v.setTextColor(TEXT);
-                v.setTextSize(15);
-                v.setPadding(dp(12), dp(12), dp(12), dp(12));
-                v.setBackground(roundRect(CARD_2, 12, Color.rgb(57, 61, 79)));
-                return v;
-            }
-        };
-        sizeSpinner.setAdapter(adapter);
+        card.addView(fieldLabel("Canvas"));
+        sizeSpinner = styledSpinner(new String[]{"512 × 512", "640 × 640", "768 × 768", "896 × 896", "1024 × 1024"});
         sizeSpinner.setSelection(2);
-        card.addView(sizeSpinner, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)));
+        card.addView(sizeSpinner, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(54)));
+
+        TextView samplingTitle = text("SAMPLING", 11, ACCENT_2, true);
+        samplingTitle.setLetterSpacing(0.1f);
+        samplingTitle.setPadding(0, dp(18), 0, dp(2));
+        card.addView(samplingTitle);
 
         stepsValue = text("20", 13, ACCENT_2, true);
         card.addView(sliderLabel("Steps", stepsValue));
@@ -277,30 +374,44 @@ public class MainActivity extends Activity {
         stepsBar.setOnSeekBarChangeListener(simpleSeek(v -> stepsValue.setText(String.valueOf(v + 4))));
         card.addView(stepsBar);
 
-        guidanceValue = text("3.5", 13, ACCENT_2, true);
-        card.addView(sliderLabel("Distilled guidance", guidanceValue));
-        guidanceBar = new SeekBar(this);
-        guidanceBar.setMax(60);
-        guidanceBar.setProgress(25);
-        guidanceBar.setOnSeekBarChangeListener(simpleSeek(v -> guidanceValue.setText(String.format(Locale.US, "%.1f", 1.0f + v / 10f))));
-        card.addView(guidanceBar);
+        cfgValue = text("1.0", 13, ACCENT_2, true);
+        card.addView(sliderLabel("Text CFG", cfgValue));
+        cfgBar = new SeekBar(this);
+        cfgBar.setMax(90);
+        cfgBar.setProgress(5);
+        cfgBar.setOnSeekBarChangeListener(simpleSeek(v -> cfgValue.setText(String.format(Locale.US, "%.1f", 0.5f + v / 10f))));
+        card.addView(cfgBar);
 
-        card.addView(fieldLabel("Seed (-1 = random)"));
+        distilledValue = text("3.5", 13, ACCENT_2, true);
+        card.addView(sliderLabel("Distilled guidance", distilledValue));
+        distilledBar = new SeekBar(this);
+        distilledBar.setMax(70);
+        distilledBar.setProgress(35);
+        distilledBar.setOnSeekBarChangeListener(simpleSeek(v -> distilledValue.setText(String.format(Locale.US, "%.1f", v / 10f))));
+        card.addView(distilledBar);
+
+        TextView guidanceHint = text(
+                "FLUX.2 mainly uses Text CFG. FLUX.1 Dev/Krea commonly uses distilled guidance. Model profiles set both values independently.",
+                11, MUTED, false);
+        guidanceHint.setPadding(dp(2), 0, dp(2), dp(5));
+        card.addView(guidanceHint);
+
+        card.addView(fieldLabel("Seed · -1 = random"));
         seedInput = input(1);
         seedInput.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED);
         seedInput.setText("-1");
         card.addView(seedInput);
 
         vaeTilingCheck = new CheckBox(this);
-        vaeTilingCheck.setText("VAE tiling · lower peak memory");
+        vaeTilingCheck.setText("Memory saver · VAE tiling");
         vaeTilingCheck.setTextColor(TEXT);
         vaeTilingCheck.setChecked(true);
-        vaeTilingCheck.setPadding(0, dp(6), 0, dp(8));
+        vaeTilingCheck.setPadding(0, dp(7), 0, dp(10));
         card.addView(vaeTilingCheck);
 
-        generateButton = primaryButton("Generate locally");
+        generateButton = primaryButton("✦  Generate locally");
         generateButton.setOnClickListener(v -> startGeneration());
-        card.addView(generateButton, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(54)));
+        card.addView(generateButton, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(58)));
 
         cancelButton = dangerButton("Cancel generation");
         cancelButton.setVisibility(View.GONE);
@@ -315,27 +426,27 @@ public class MainActivity extends Activity {
         progress = new ProgressBar(this);
         progress.setIndeterminate(true);
         progress.setVisibility(View.GONE);
-        LinearLayout.LayoutParams pp = new LinearLayout.LayoutParams(dp(32), dp(32));
+        LinearLayout.LayoutParams pp = new LinearLayout.LayoutParams(dp(34), dp(34));
         pp.gravity = Gravity.CENTER_HORIZONTAL;
-        pp.topMargin = dp(12);
+        pp.topMargin = dp(13);
         card.addView(progress, pp);
 
-        status = text("Ready. A Q4-class FLUX model at 768² is the sensible starting point on a 16 GB Snapdragon flagship.", 12, MUTED, false);
+        status = text("Ready. FLUX.2 Klein 4B Q4 at 768² is the recommended starting point for a 16 GB phone.", 12, MUTED, false);
         status.setGravity(Gravity.CENTER_HORIZONTAL);
-        status.setPadding(0, dp(8), 0, dp(10));
+        status.setPadding(dp(5), dp(9), dp(5), dp(12));
         card.addView(status);
 
         resultImage = new ImageView(this);
         resultImage.setAdjustViewBounds(true);
         resultImage.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        resultImage.setBackground(roundRect(Color.rgb(12, 13, 19), 16, Color.rgb(45, 48, 62)));
-        resultImage.setMinimumHeight(dp(260));
+        resultImage.setBackground(roundRect(Color.rgb(11, 11, 18), 18, Color.rgb(52, 48, 69)));
+        resultImage.setMinimumHeight(dp(280));
         card.addView(resultImage, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         saveButton = secondaryButton("Save PNG to gallery");
         saveButton.setEnabled(false);
         saveButton.setOnClickListener(v -> saveCurrent());
-        LinearLayout.LayoutParams saveLp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48));
+        LinearLayout.LayoutParams saveLp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(50));
         saveLp.topMargin = dp(10);
         card.addView(saveButton, saveLp);
 
@@ -344,7 +455,7 @@ public class MainActivity extends Activity {
 
     private View buildFaceCard() {
         LinearLayout card = card();
-        card.addView(sectionTitle("3 · Self face swap"));
+        card.addView(sectionTitle("Face swap"));
         card.addView(text(
                 "On-device SCRFD detection + ArcFace identity embedding + INSwapper compositing. The source photo should be your own likeness or a person who explicitly authorized the swap.",
                 13, MUTED, false));
@@ -545,7 +656,8 @@ public class MainActivity extends Activity {
         int[] sizes = {512, 640, 768, 896, 1024};
         int side = sizes[Math.max(0, sizeSpinner.getSelectedItemPosition())];
         int steps = stepsBar.getProgress() + 4;
-        float guidance = 1.0f + guidanceBar.getProgress() / 10f;
+        float textCfg = 0.5f + cfgBar.getProgress() / 10f;
+        float distilledGuidance = distilledBar.getProgress() / 10f;
         long seed;
         try {
             seed = Long.parseLong(seedInput.getText().toString().trim());
@@ -563,8 +675,8 @@ public class MainActivity extends Activity {
             try {
                 int[] pixels = nativeGenerate(
                         model, diffusion, prefPath("vae"), prefPath("clip_l"), prefPath("t5"), prefPath("llm"),
-                        prompt, negativeInput.getText().toString(), side, side, steps, guidance, finalSeed,
-                        vaeTilingCheck.isChecked());
+                        prompt, negativeInput.getText().toString(), side, side, steps,
+                        textCfg, distilledGuidance, finalSeed, vaeTilingCheck.isChecked());
                 if (pixels == null || pixels.length != side * side) {
                     throw new Exception("Native generator returned no image");
                 }
@@ -691,6 +803,7 @@ public class MainActivity extends Activity {
                 v.setTextColor(f.exists() ? ACCENT_2 : DANGER);
             }
         }
+        refreshModelSummary();
     }
 
     private String prefPath(String role) {
@@ -783,16 +896,179 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {}
     }
 
+    private Spinner styledSpinner(String[] entries) {
+        Spinner spinner = new Spinner(this);
+        ArrayAdapter<String> adapter = new ArrayAdapter<String>(this, android.R.layout.simple_spinner_dropdown_item, entries) {
+            @Override public View getView(int position, View convertView, android.view.ViewGroup parent) {
+                TextView v = (TextView) super.getView(position, convertView, parent);
+                v.setTextColor(TEXT);
+                v.setTextSize(14);
+                v.setPadding(dp(13), dp(12), dp(13), dp(12));
+                v.setBackground(roundRect(CARD_2, 13, Color.rgb(62, 57, 82)));
+                return v;
+            }
+            @Override public View getDropDownView(int position, View convertView, android.view.ViewGroup parent) {
+                TextView v = (TextView) super.getDropDownView(position, convertView, parent);
+                v.setTextColor(TEXT);
+                v.setTextSize(14);
+                v.setPadding(dp(15), dp(14), dp(15), dp(14));
+                v.setBackgroundColor(Color.rgb(35, 32, 49));
+                return v;
+            }
+        };
+        spinner.setAdapter(adapter);
+        return spinner;
+    }
+
+    private TextView chip(String label) {
+        TextView v = text(label, 10, TEXT, true);
+        v.setLetterSpacing(0.08f);
+        v.setGravity(Gravity.CENTER);
+        v.setPadding(dp(10), dp(6), dp(10), dp(6));
+        v.setBackground(roundRect(Color.rgb(28, 25, 42), 20, Color.rgb(66, 57, 91)));
+        return v;
+    }
+
+    private Button tabButton(String label) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setTextSize(13);
+        b.setAllCaps(false);
+        b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        b.setStateListAnimator(null);
+        return b;
+    }
+
+    private void switchTab(int tab) {
+        if (generationCard == null || modelCard == null || faceCard == null) return;
+        generationCard.setVisibility(tab == 0 ? View.VISIBLE : View.GONE);
+        modelCard.setVisibility(tab == 1 ? View.VISIBLE : View.GONE);
+        faceCard.setVisibility(tab == 2 ? View.VISIBLE : View.GONE);
+        setTabState(createTab, tab == 0);
+        setTabState(modelsTab, tab == 1);
+        setTabState(faceTab, tab == 2);
+    }
+
+    private void setTabState(Button b, boolean active) {
+        if (b == null) return;
+        b.setTextColor(active ? Color.WHITE : MUTED);
+        b.setBackground(active
+                ? gradientRect(new int[]{Color.rgb(123, 83, 242), Color.rgb(157, 103, 255)}, 14, Color.rgb(166, 127, 255))
+                : roundRect(Color.TRANSPARENT, 14, Color.TRANSPARENT));
+    }
+
+    private void applyProfile(int p, boolean tuneSampling) {
+        if (p < 0 || p >= MODEL_PROFILES.length) p = 0;
+        if (profileInfo != null) profileInfo.setText(profileDescription(p));
+
+        int steps = 20;
+        float cfg = 7.0f;
+        float distilled = 3.5f;
+        switch (p) {
+            case 1:
+                steps = 4; cfg = 1.0f; distilled = 3.5f; break;
+            case 2:
+                steps = 20; cfg = 4.0f; distilled = 3.5f; break;
+            case 3:
+                steps = 4; cfg = 1.0f; distilled = 3.5f; break;
+            case 4:
+                steps = 20; cfg = 4.0f; distilled = 3.5f; break;
+            case 5:
+                steps = 20; cfg = 1.0f; distilled = 3.5f; break;
+            case 6:
+                steps = 20; cfg = 1.0f; distilled = 3.5f; break;
+            case 7:
+                steps = 4; cfg = 1.0f; distilled = 3.5f; break;
+            default:
+                break;
+        }
+        if (tuneSampling && stepsBar != null && cfgBar != null && distilledBar != null) {
+            setSteps(steps);
+            setTextCfg(cfg);
+            setDistilledGuidance(distilled);
+        }
+        refreshModelSummary();
+    }
+
+    private String profileDescription(int p) {
+        switch (p) {
+            case 1:
+                return "BEST PHONE FIT · FLUX.2 Klein 4B\nImport: diffusion + FLUX.2 VAE/AE + Qwen3 4B in the LLM slot. Q4-class GGUF is the sensible target. Distilled 4-step model.";
+            case 2:
+                return "QUALITY PHONE PROFILE · FLUX.2 Klein Base 4B\nSame files as Klein 4B, but the base model is intended for a fuller ~20-step sampling run and higher CFG.";
+            case 3:
+                return "EXPERIMENTAL · FLUX.2 Klein 9B\nImport: diffusion + FLUX.2 VAE/AE + Qwen3 8B. A 16 GB phone may run a strongly quantized stack, but memory pressure and thermals will be much higher.";
+            case 4:
+                return "EXPERIMENTAL QUALITY · FLUX.2 Klein Base 9B\nThe heavier 9B base model plus Qwen3 8B is a tight fit on 16 GB. Use aggressive quantization and VAE tiling.";
+            case 5:
+                return "TECHNICALLY SUPPORTED, NOT A PHONE TARGET · FLUX.2 Dev\nThe diffusion model is 32B and uses Mistral Small 3.2 24B as text encoder. Import remains possible, but practical local generation on 16 GB is unlikely.";
+            case 6:
+                return "FLUX.1 KREA / DEV\nImport: diffusion + VAE + CLIP-L + T5XXL. The engine auto-detects Krea/Dev weights. Distilled guidance remains available separately from text CFG.";
+            case 7:
+                return "FLUX.1 SCHNELL\nImport the normal FLUX.1 split stack. Tuned here for a fast 4-step run.";
+            case 8:
+                return "GENERIC ENGINE MODE\nCurrent stable-diffusion.cpp also supports Qwen Image, Z-Image, Krea2, Chroma, SD3.x and more. Use the slots required by that architecture and tune sampling manually.";
+            default:
+                return "AUTO / CUSTOM\nNo assumptions are made. stable-diffusion.cpp detects the architecture from the imported weights; all sampling controls remain manual.";
+        }
+    }
+
+    private void setSteps(int steps) {
+        int clamped = Math.max(4, Math.min(40, steps));
+        stepsBar.setProgress(clamped - 4);
+        stepsValue.setText(String.valueOf(clamped));
+    }
+
+    private void setTextCfg(float value) {
+        float clamped = Math.max(0.5f, Math.min(9.5f, value));
+        cfgBar.setProgress(Math.round((clamped - 0.5f) * 10f));
+        cfgValue.setText(String.format(Locale.US, "%.1f", clamped));
+    }
+
+    private void setDistilledGuidance(float value) {
+        float clamped = Math.max(0f, Math.min(7f, value));
+        distilledBar.setProgress(Math.round(clamped * 10f));
+        distilledValue.setText(String.format(Locale.US, "%.1f", clamped));
+    }
+
+    private void refreshModelSummary() {
+        if (modelSummary == null) return;
+        int profile = prefs.getInt("model_profile", 1);
+        profile = Math.max(0, Math.min(MODEL_PROFILES.length - 1, profile));
+        String root = prefPath("model");
+        String diffusion = prefPath("diffusion");
+        String name;
+        if (!root.isEmpty()) name = prefs.getString("model_name", new File(root).getName());
+        else if (!diffusion.isEmpty()) name = prefs.getString("diffusion_name", new File(diffusion).getName());
+        else name = "No model imported";
+        modelSummary.setText(MODEL_PROFILES[profile] + "  ·  " + name);
+    }
+
+    private GradientDrawable backgroundGradient() {
+        GradientDrawable d = new GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{BG, Color.rgb(13, 10, 21), BG_2});
+        return d;
+    }
+
+    private GradientDrawable gradientRect(int[] colors, int radiusDp, int stroke) {
+        GradientDrawable d = new GradientDrawable(GradientDrawable.Orientation.TL_BR, colors);
+        d.setCornerRadius(dp(radiusDp));
+        d.setStroke(dp(1), stroke);
+        return d;
+    }
+
     private LinearLayout card() {
         LinearLayout l = column();
-        l.setPadding(dp(16), dp(16), dp(16), dp(16));
-        l.setBackground(roundRect(CARD, 20, Color.rgb(43, 46, 61)));
+        l.setPadding(dp(17), dp(17), dp(17), dp(17));
+        l.setBackground(gradientRect(new int[]{CARD, Color.rgb(25, 22, 38)}, 22, Color.rgb(51, 46, 69)));
+        l.setElevation(dp(2));
         return l;
     }
 
     private TextView sectionTitle(String s) {
-        TextView v = text(s, 20, TEXT, true);
-        v.setPadding(0, 0, 0, dp(8));
+        TextView v = text(s, 22, TEXT, true);
+        v.setPadding(0, 0, 0, dp(10));
         return v;
     }
 
@@ -805,7 +1081,7 @@ public class MainActivity extends Activity {
         e.setMinLines(lines);
         e.setMaxLines(Math.max(lines, 6));
         e.setPadding(dp(12), dp(10), dp(12), dp(10));
-        e.setBackground(roundRect(CARD_2, 12, Color.rgb(57, 61, 79)));
+        e.setBackground(roundRect(CARD_2, 14, Color.rgb(66, 59, 89)));
         return e;
     }
 
@@ -847,7 +1123,9 @@ public class MainActivity extends Activity {
         b.setTextSize(15);
         b.setAllCaps(false);
         b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        b.setBackground(roundRect(ACCENT, 14, ACCENT));
+        b.setStateListAnimator(null);
+        b.setElevation(dp(2));
+        b.setBackground(gradientRect(new int[]{Color.rgb(116, 78, 239), Color.rgb(163, 104, 255)}, 15, Color.rgb(174, 130, 255)));
         return b;
     }
 
@@ -857,7 +1135,8 @@ public class MainActivity extends Activity {
         b.setTextColor(TEXT);
         b.setTextSize(13);
         b.setAllCaps(false);
-        b.setBackground(roundRect(CARD_2, 12, Color.rgb(64, 68, 88)));
+        b.setStateListAnimator(null);
+        b.setBackground(roundRect(CARD_2, 13, Color.rgb(70, 63, 94)));
         return b;
     }
 
