@@ -381,7 +381,8 @@ Java_com_localflux_studio_MainActivity_nativeSystemInfo(JNIEnv* env, jclass) {
     });
 
     std::string out = sd_get_system_info() ? sd_get_system_info() : "stable-diffusion.cpp";
-    out += "\nCPU target: ARMv8.6 + DOTPROD + I8MM; KleidiAI enabled for Q4_0/Q8_0";\n    out += "\nKlein conditioning: adaptive 64/128-token Qwen modes + upstream 512-token reference";
+    out += "\nCPU target: ARMv8.6 + DOTPROD + I8MM; KleidiAI enabled for Q4_0/Q8_0";
+    out += "\nKlein conditioning: adaptive 64/128-token Qwen modes + upstream 512-token reference";
     const size_t n = sd_list_devices(nullptr, 0);
     if (n > 0) {
         std::vector<char> buf(n + 1, 0);
