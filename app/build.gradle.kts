@@ -26,7 +26,8 @@ android {
                     "-DSD_VULKAN=ON",
                     "-DSD_BUILD_EXAMPLES=OFF",
                     "-DSD_WEBP=OFF",
-                    "-DSD_WEBM=OFF"
+                    "-DSD_WEBM=OFF",
+                    "-DSPIRV-Headers_DIR=/usr/share/cmake/SPIRV-Headers"
                 )
             }
         }
