@@ -145,7 +145,8 @@ Java_com_localflux_studio_MainActivity_nativeGenerate(
         jint width,
         jint height,
         jint steps,
-        jfloat guidance,
+        jfloat textCfg,
+        jfloat distilledGuidance,
         jlong seed,
         jboolean vaeTiling) {
 
@@ -192,7 +193,8 @@ Java_com_localflux_studio_MainActivity_nativeGenerate(
     gp.seed = static_cast<int64_t>(seed);
     gp.batch_count = 1;
     gp.sample_params.sample_steps = steps;
-    gp.sample_params.guidance.distilled_guidance = guidance;
+    gp.sample_params.guidance.txt_cfg = textCfg;
+    gp.sample_params.guidance.distilled_guidance = distilledGuidance;
     gp.vae_tiling_params.enabled = (vaeTiling == JNI_TRUE);
 
     if (gp.sample_params.sample_method == SAMPLE_METHOD_COUNT) {
