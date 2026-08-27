@@ -702,7 +702,8 @@ public class MainActivity extends Activity {
                 "Vulkan Balanced · min 32 · 1.25 GiB streamed",
                 "Vulkan Reference · full 512 · 1.25 GiB streamed",
                 "CPU + disk · full 512 · emergency",
-                "Vulkan Legacy · min 32 · AUTO VRAM · diagnostic"
+                "Vulkan Legacy · min 32 · AUTO VRAM · diagnostic",
+                "Vulkan Safe + disk staging · min 24 · 0.75 GiB"
         });
 
         // v1.3.5 replaces Android's misleading Vulkan auto-VRAM budget with
@@ -736,14 +737,14 @@ public class MainActivity extends Activity {
                     .remove("extreme_ram_saver")
                     .apply();
         } else {
-            savedTeMode = Math.max(0, Math.min(11, prefs.getInt("text_encoder_mode", 0)));
+            savedTeMode = Math.max(0, Math.min(12, prefs.getInt("text_encoder_mode", 0)));
         }
 
         textEncoderModeSpinner.setSelection(savedTeMode);
         textEncoderModeSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
                 prefs.edit()
-                        .putInt("text_encoder_mode", Math.max(0, Math.min(11, position)))
+                        .putInt("text_encoder_mode", Math.max(0, Math.min(12, position)))
                         .putInt("text_encoder_mode_schema", 5)
                         .apply();
             }
@@ -771,7 +772,7 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(52)));
 
         TextView ramHint = text(
-                "Vulkan Safe is the primary FLUX.2 Klein path on 16 GB Adreno devices: it runs a short Qwen graph, caps graph residency at 0.90 GiB, streams layers, enables diffusion flash attention, and uses bounded Vulkan allocations. Balanced raises the graph budget to 1.25 GiB. Legacy preserves the old auto-VRAM behavior only for diagnosis. CPU Q4_0 can use KleidiAI but remains a slower fallback; Q4_K_M uses ARM DOTPROD/I8MM.",
+                "Vulkan Safe is the primary FLUX.2 Klein path on 16 GB Adreno devices: it runs a short Qwen graph, caps graph residency at 0.90 GiB, streams layers, enables diffusion flash attention, and uses bounded Vulkan allocations. Safe + disk staging lowers residency to 0.75 GiB and streams Qwen parameters from storage while keeping compute on Vulkan. Balanced raises the graph budget to 1.25 GiB. Legacy preserves the old auto-VRAM behavior only for diagnosis. CPU Q4_0 can use KleidiAI but remains a slower fallback; Q4_K_M uses ARM DOTPROD/I8MM.",
                 11, MUTED, false);
         ramHint.setPadding(dp(2), dp(4), dp(2), dp(5));
         card.addView(ramHint);
@@ -1784,9 +1785,9 @@ public class MainActivity extends Activity {
 
     private int selectedTextEncoderMode() {
         if (textEncoderModeSpinner == null) {
-            return Math.max(0, Math.min(11, prefs.getInt("text_encoder_mode", 0)));
+            return Math.max(0, Math.min(12, prefs.getInt("text_encoder_mode", 0)));
         }
-        return Math.max(0, Math.min(11, textEncoderModeSpinner.getSelectedItemPosition()));
+        return Math.max(0, Math.min(12, textEncoderModeSpinner.getSelectedItemPosition()));
     }
 
     private String textEncoderModeLabel(int mode) {
@@ -1802,6 +1803,7 @@ public class MainActivity extends Activity {
             case 9: return "Vulkan Reference 512 · 1.25 GiB";
             case 10:return "CPU+disk 512 · 1.00 GiB";
             case 11:return "Vulkan Legacy 32 · auto VRAM";
+            case 12:return "Vulkan Safe 24 · disk staged · 0.75 GiB";
             default:return "CPU Fast 24 · 1.25 GiB";
         }
     }
