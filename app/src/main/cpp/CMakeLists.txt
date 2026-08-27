@@ -24,7 +24,12 @@ add_subdirectory("${SDCPP_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/stable-diffusion")
 # required by current ggml-vulkan. CI installs Vulkan-Headers on the host; expose
 # those header-only declarations explicitly to the cross-compiled target.
 if(ANDROID AND TARGET ggml-vulkan)
-    target_include_directories(ggml-vulkan PRIVATE /usr/include)
+    set(ANDROID_VULKAN_HPP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../vendor/vulkan-headers")
+    if(EXISTS "${ANDROID_VULKAN_HPP_DIR}/vulkan/vulkan.hpp")
+        target_include_directories(ggml-vulkan PRIVATE "${ANDROID_VULKAN_HPP_DIR}")
+    else()
+        message(FATAL_ERROR "Android Vulkan C++ headers were not staged at ${ANDROID_VULKAN_HPP_DIR}")
+    endif()
 endif()
 
 add_library(localflux SHARED native-lib.cpp)
