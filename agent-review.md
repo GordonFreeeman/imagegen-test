@@ -402,3 +402,101 @@ CI run `33075469107` verified:
 - persistent sideload signer SHA-256 `6c4c89639285c16e367171b085115e436459644714eb81d4c22fd6e2164e879c`
 
 Because v1.2.1 uses the same signer as v1.2.0 and has a higher versionCode, Android can install it directly over v1.2.0 while preserving app-private model files and settings.
+
+
+# v1.2.2 Qwen Performance / Progress Accuracy Review
+
+Final reviewed application commit: `d196ff59848b3618dd7e973e9c330ac0a90ee6c7`  
+Successful CI run: `33077154915`  
+APK version: 1.2.2 (versionCode 6), targetSdk 36, minSdk 29.
+
+## Iteration 1
+
+### Logic Inquisitor
+
+**Verdict:** REJECTED
+
+**Blocking findings:**
+
+1. The default FLUX.2 mobile policy used `params_backend te=disk`, which prioritizes minimum RAM residency over practical conditioning speed.
+   - Evidence: stable-diffusion.cpp performance documentation explicitly states that the disk params backend reloads parameters from model files on demand and releases them after use, and can be slower due to repeated reads. The reported device behavior showed lazy tensor progress reaching 298/298 while the phone stayed relatively cool and sampling never began.
+   - Expected behavior: on the target 16 GB device, the quantized Qwen encoder should remain in CPU RAM by default so prompt conditioning is compute/memory-bandwidth bound rather than storage-reload bound.
+   - Required correction: default to `te=cpu` parameter residency while retaining a user-selectable disk-backed fallback for severe memory pressure.
+   - Severity: High
+
+2. Sampling phase detection was still too early.
+   - Evidence: stable-diffusion.cpp logs `sampling using ...` while constructing `SamplePlan`, before prompt embeddings are prepared. The actual diffusion loop begins only after `LOG_INFO("generating image: ...")`.
+   - Expected behavior: UI sampling state may only begin immediately before the real diffusion sampling loop.
+   - Required correction: gate sampling state on `generating image:`, and keep Qwen/text encoding in the conditioning phase.
+   - Severity: High
+
+3. Runtime UI controls were read from the worker thread and could diverge from the configuration actually started.
+   - Evidence: VAE tiling, live preview, LoRA arrays, and memory-mode values were queried after worker dispatch.
+   - Expected behavior: all generation options are snapshotted on the UI thread when Generate is pressed and relevant toggles are locked for the duration.
+   - Required correction: snapshot values before worker execution and disable mutable runtime toggles until completion.
+   - Severity: Medium
+
+**Verification performed:**
+- Inspected the supplied runtime screenshot showing `298/298` lazy tensors, multi-minute inactivity, and no indication that GPU sampling had begun.
+- Inspected pinned stable-diffusion.cpp performance/backend documentation for CPU versus disk parameter residency.
+- Inspected stable-diffusion.cpp `generate_image`, `SamplePlan`, prompt-conditioning, and diffusion-loop order.
+- Verified `sampling using` occurs before `prepare_image_generation_embeds`, while `generating image:` occurs immediately before `sample()`.
+
+### Aesthetic Executioner
+
+**Verdict:** APPROVED
+
+**Blocking findings:**
+- None.
+
+**Non-blocking improvements:**
+- The extra memory-mode explanation increases vertical density slightly, but it is justified by the significant speed/RAM tradeoff and remains within the existing scrolling Create card.
+
+**Verification performed:**
+- Inspected the supplied running-app screenshot for current control spacing, hierarchy, progress area, and result viewport.
+- Inspected the revised Create-screen UI code with the added Extreme RAM saver checkbox and explanatory hint.
+- Confirmed no fixed-width layout or new horizontal overflow path was introduced.
+
+## Iteration 2 — Final
+
+### Logic Inquisitor
+
+**Verdict:** APPROVED
+
+**Blocking findings:**
+- None.
+
+**Non-blocking improvements:**
+- A future physical-device benchmark can determine whether moving the VAE runtime to Vulkan is worthwhile after generation itself is confirmed stable.
+- CPU-resident Qwen increases Android process RSS by roughly the size of the quantized text encoder; the explicit Extreme RAM saver fallback remains necessary for devices with less free memory.
+
+**Verification performed:**
+- Verified default split-model policy is now:
+  - runtime backend: `diffusion=gpu,te=cpu,vae=cpu`
+  - parameter backend: `diffusion=cpu,te=cpu,vae=cpu`
+  - `max_vram=-1`
+  - `stream_layers=true`
+- Verified optional Extreme RAM saver switches only TE parameter residency back to `te=disk`.
+- Verified the context cache key includes RAM mode, forcing a safe context reload when the mode changes.
+- Verified sampling starts only on the engine's `generating image:` log event.
+- Verified `get_learned_condition completed` returns the UI to a distinct conditioning/pre-sampler state.
+- Verified generation options are snapshotted before worker dispatch.
+- Verified VAE tiling, RAM saver, live preview and preview interval controls are locked while generation is active.
+- GitHub Actions run 33077154915 passed native/Java build, lint, configured tests, APK assembly, SDK 36/version metadata checks, 16 KB alignment and persistent signing verification.
+
+### Aesthetic Executioner
+
+**Verdict:** APPROVED
+
+**Blocking findings:**
+- None.
+
+**Verification performed:**
+- Re-inspected final UI code after runtime-control locking.
+- Confirmed the new memory-mode control follows the existing checkbox/hint visual language and sits above live preview without disrupting button hierarchy.
+- Confirmed the existing vertical ScrollView accommodates the added content.
+- No emulator or second physical-device render was available beyond the user's supplied screenshot.
+
+## Final status
+
+Both reviewers approved application commit `d196ff59848b3618dd7e973e9c330ac0a90ee6c7`. The subsequent review-log commit only updates this document and does not alter the APK source/resources.
