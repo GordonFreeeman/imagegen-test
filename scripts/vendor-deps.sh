@@ -73,6 +73,43 @@ if old not in s:
 s = s.replace(old, new, 1)
 p.write_text(s)
 PY
+
+# The pinned runner can free Vulkan scheduler/parameter buffers immediately after
+# Qwen conditioning. Force completion of queued backend work first. This is
+# especially important on Android where native process aborts bypass Java error
+# handling and Adreno drivers may still own resources after the compute call.
+python3 - <<'PY'
+from pathlib import Path
+
+p = Path("vendor/stable-diffusion.cpp/src/core/ggml_extend.hpp")
+s = p.read_text()
+old = '''public:
+    void runner_done() {
+        free_compute_buffer();
+'''
+new = '''public:
+    void runner_done() {
+        // Local Flux Studio: make the Qwen -> diffusion handoff synchronous
+        // before tearing down scheduler and staged parameter buffers.
+        if (sched != nullptr) {
+            ggml_backend_sched_synchronize(sched);
+        }
+        if (runtime_backend != nullptr) {
+            ggml_backend_synchronize(runtime_backend);
+        }
+        for (ggml_backend_t backend : extra_runtime_backends) {
+            if (backend != nullptr) {
+                ggml_backend_synchronize(backend);
+            }
+        }
+        free_compute_buffer();
+'''
+if old not in s:
+    raise SystemExit("Pinned GGMLRunner layout changed; refusing to apply Vulkan handoff patch")
+s = s.replace(old, new, 1)
+p.write_text(s)
+PY
+
 git clone https://github.com/Parasaran-Python/android-face-fusion vendor/android-face-fusion
 git -C vendor/android-face-fusion checkout "$FACE_COMMIT"
 
