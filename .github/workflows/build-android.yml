@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: local-flux-studio-${{ github.ref }}
+  cancel-in-progress: true
+
 
 jobs:
   build:
