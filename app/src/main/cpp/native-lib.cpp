@@ -137,10 +137,13 @@ void android_log_cb(enum sd_log_level_t level, const char* text, void*) {
         std::string lower(text);
         std::transform(lower.begin(), lower.end(), lower.begin(),
                        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-        if (lower.find("sampling using") != std::string::npos ||
-            lower.find("sampling(high noise) using") != std::string::npos) {
+        if (lower.find("generating image:") != std::string::npos) {
             g_sampling_started.store(true);
             set_phase(PHASE_SAMPLING, 0, g_expected_sample_steps.load());
+        }
+
+        if (lower.find("get_learned_condition completed") != std::string::npos) {
+            set_phase(PHASE_CONDITIONING, 0, 0);
         }
 
         const int phase = g_phase.load();
@@ -179,9 +182,10 @@ std::string make_key(
         const std::string& vae,
         const std::string& clipL,
         const std::string& t5,
-        const std::string& llm) {
+        const std::string& llm,
+        bool extreme_ram_saver) {
     return model + "\n" + diffusion + "\n" + vae + "\n" + clipL + "\n" + t5 + "\n" + llm +
-           "\nmobile-safe-v2";
+           (extreme_ram_saver ? "\nmobile-safe-v3-te-disk" : "\nmobile-safe-v3-te-ram");
 }
 
 sd_ctx_t* ensure_context(
@@ -191,9 +195,10 @@ sd_ctx_t* ensure_context(
         const std::string& vae,
         const std::string& clipL,
         const std::string& t5,
-        const std::string& llm) {
+        const std::string& llm,
+        bool extreme_ram_saver) {
 
-    const std::string key = make_key(model, diffusion, vae, clipL, t5, llm);
+    const std::string key = make_key(model, diffusion, vae, clipL, t5, llm, extreme_ram_saver);
     std::lock_guard<std::mutex> lock(g_ctx_mutex);
 
     if (g_ctx && g_ctx_key == key) {
@@ -233,7 +238,9 @@ sd_ctx_t* ensure_context(
         // - keep the large LLM/text encoder disk-backed to reduce Android process RSS
         // - reserve ~1 GiB GPU headroom via graph-cut segmentation
         p.backend = "diffusion=gpu,te=cpu,vae=cpu";
-        p.params_backend = "diffusion=cpu,te=disk,vae=cpu";
+        p.params_backend = extreme_ram_saver
+                ? "diffusion=cpu,te=disk,vae=cpu"
+                : "diffusion=cpu,te=cpu,vae=cpu";
         p.max_vram = "-1";
         p.stream_layers = true;
         p.auto_fit = false;
@@ -246,7 +253,8 @@ sd_ctx_t* ensure_context(
         __android_log_print(
                 ANDROID_LOG_INFO, TAG,
                 "Loading split-model context in mobile-safe mode "
-                "(diffusion=gpu, te/vae=cpu, params diffusion=cpu te=disk, max_vram=-1, stream_layers=1)");
+                "(diffusion=gpu, te/vae=cpu, params diffusion=cpu te=%s, max_vram=-1, stream_layers=1)",
+                extreme_ram_saver ? "disk" : "cpu");
     } else {
         // Preserve automatic placement for genuinely self-contained checkpoints.
         p.auto_fit = true;
@@ -315,7 +323,8 @@ Java_com_localflux_studio_MainActivity_nativeGenerate(
         jboolean livePreview,
         jint previewInterval,
         jobjectArray jLoraPaths,
-        jfloatArray jLoraStrengths) {
+        jfloatArray jLoraStrengths,
+        jboolean extremeRamSaver) {
 
     std::call_once(g_log_once, [] {
         sd_set_log_callback(android_log_cb, nullptr);
@@ -377,7 +386,8 @@ Java_com_localflux_studio_MainActivity_nativeGenerate(
     sd_set_progress_callback(load_progress_cb, nullptr);
     sd_set_preview_callback(nullptr, PREVIEW_NONE, 1, true, false, nullptr);
 
-    sd_ctx_t* ctx = ensure_context(env, model, diffusion, vae, clipL, t5, llm);
+    sd_ctx_t* ctx = ensure_context(env, model, diffusion, vae, clipL, t5, llm,
+                                  extremeRamSaver == JNI_TRUE);
     if (!ctx || env->ExceptionCheck()) {
         set_phase(PHASE_ERROR);
         return nullptr;
