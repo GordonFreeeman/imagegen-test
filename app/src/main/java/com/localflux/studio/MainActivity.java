@@ -184,9 +184,10 @@ public class MainActivity extends Activity {
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private volatile boolean generationActive = false;
     private int lastPreviewVersion = 0;
-    private int lastProgressPhase = -1;
-    private int lastProgressStep = -1;
-    private long lastProgressChangeMs = 0L;
+    private volatile int lastProgressPhase = -1;
+    private volatile int lastProgressStep = -1;
+    private volatile long lastProgressChangeMs = 0L;
+    private volatile String generationConfigSummary = "No generation started yet";
 
     private static final int MAX_CONSOLE_CHARS = 140_000;
     private final StringBuilder consoleBuffer = new StringBuilder();
@@ -231,7 +232,7 @@ public class MainActivity extends Activity {
         @Override public void run() {
             if (diagnosticsStopped) return;
             if (diagnosticsBusy) {
-                uiHandler.postDelayed(this, 1000);
+                uiHandler.postDelayed(this, 2000);
                 return;
             }
             diagnosticsBusy = true;
@@ -259,7 +260,7 @@ public class MainActivity extends Activity {
                         lastTelemetryConsoleMs = now;
                         appendConsole("METRIC", snapshot.compact);
                     }
-                    uiHandler.postDelayed(diagnosticsPoller, 1000);
+                    uiHandler.postDelayed(diagnosticsPoller, 2000);
                 });
             });
         }
@@ -1084,6 +1085,12 @@ public class MainActivity extends Activity {
         final String[] loraPaths = loraPathsForGeneration();
         final float[] loraStrengths = loraStrengthsForGeneration();
         final boolean useExtremeRamSaver = extremeRamSaverCheck.isChecked();
+        int activeLoras = 0;
+        for (String path : loraPaths) if (path != null && !path.isEmpty()) activeLoras++;
+        generationConfigSummary = MODEL_PROFILES[profile] + " · " + width + "×" + height
+                + " · " + steps + " steps · Qwen " + (useExtremeRamSaver ? "disk" : "RAM")
+                + " · preview " + (useLivePreview ? "ON" : "OFF")
+                + (activeLoras > 0 ? " · LoRA×" + activeLoras : "");
 
         worker.execute(() -> {
             try {
@@ -1409,6 +1416,8 @@ public class MainActivity extends Activity {
                 ? Math.max(0L, now - lastNativeEventUptimeMs) : -1L;
 
         String gpuDevice = extractGpuDevice(runtimeInfo);
+        String runLine = (generationActive ? "RUN ACTIVE · " : "RUN IDLE · ") + generationConfigSummary
+                + " · phase " + phaseName(lastProgressPhase);
         String cpuLine = "CPU app " + percentOrNA(appCpuPct)
                 + (coreEquivalent >= 0 ? String.format(Locale.US, " · %.2f cores", coreEquivalent) : "")
                 + " | system " + percentOrNA(systemCpuPct)
@@ -1426,8 +1435,8 @@ public class MainActivity extends Activity {
                 + (Float.isNaN(batteryTemp) ? "" : String.format(Locale.US, " · battery %.1f°C", batteryTemp))
                 + " | native log " + (nativeAge < 0 ? "none yet" : formatDurationShort(nativeAge) + " ago");
 
-        String display = cpuLine + "\n" + memoryLine + "\n" + heapLine + "\n" + gpuLine + "\n" + thermalLine;
-        String compact = cpuLine + " | " + memoryLine + " | " + gpuLine + " | " + thermalLine;
+        String display = runLine + "\n" + cpuLine + "\n" + memoryLine + "\n" + heapLine + "\n" + gpuLine + "\n" + thermalLine;
+        String compact = runLine + " | " + cpuLine + " | " + memoryLine + " | " + gpuLine + " | " + thermalLine;
         return new TelemetrySnapshot(display, compact);
     }
 
