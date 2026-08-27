@@ -161,6 +161,16 @@ public class MainActivity extends Activity {
         refreshModelRows();
         refreshGenerateEnabled();
         refreshFaceEnabled();
+
+        if (prefs.getBoolean("generation_in_progress", false)) {
+            prefs.edit().putBoolean("generation_in_progress", false).apply();
+            if (sizeSpinner != null) sizeSpinner.setSelection(0);
+            if (status != null) {
+                status.setText("The previous generation ended with an unexpected process termination. "
+                        + "Mobile-safe memory mode is enabled; retry starts at 512 × 512.");
+                status.setTextColor(GOLD);
+            }
+        }
     }
 
     private View buildUi() {
@@ -541,6 +551,11 @@ public class MainActivity extends Activity {
     }
 
     private void chooseModel(String role) {
+        int profile = currentProfile();
+        if ("model".equals(role) && isFlux2Profile(profile)) {
+            toast("FLUX.2 uses split weights. Import the Klein/Dev GGUF under Diffusion / transformer.");
+            return;
+        }
         pendingRole = role;
         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         i.addCategory(Intent.CATEGORY_OPENABLE);
@@ -578,6 +593,8 @@ public class MainActivity extends Activity {
             File dest = null;
             try {
                 String display = displayName(uri);
+                String fileProblem = modelFileProblem(roleCopy, display);
+                if (!fileProblem.isEmpty()) throw new Exception(fileProblem);
                 File dir = new File(getFilesDir(), "models");
                 if (!dir.exists() && !dir.mkdirs()) throw new Exception("Could not create model directory");
                 String safe = display.replaceAll("[^A-Za-z0-9._-]", "_");
@@ -668,8 +685,11 @@ public class MainActivity extends Activity {
         }
 
         warnThermalIfNeeded();
+        prefs.edit().putBoolean("generation_in_progress", true).commit();
         setGenerating(true);
-        status.setText("Loading/caching model stack and generating locally. First run is the slowest…");
+        status.setText(diffusion.isEmpty()
+                ? "Loading/caching model stack and generating locally. First run is the slowest…"
+                : "Mobile-safe mode: loading text/VAE on CPU and streaming diffusion weights to Vulkan…");
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         final long finalSeed = seed;
@@ -684,6 +704,7 @@ public class MainActivity extends Activity {
                 }
                 Bitmap b = Bitmap.createBitmap(pixels, side, side, Bitmap.Config.ARGB_8888);
                 runOnUiThread(() -> {
+                    prefs.edit().putBoolean("generation_in_progress", false).apply();
                     currentBitmap = b;
                     resultImage.setImageBitmap(b);
                     saveButton.setEnabled(true);
@@ -692,6 +713,7 @@ public class MainActivity extends Activity {
                 });
             } catch (Throwable e) {
                 runOnUiThread(() -> {
+                    prefs.edit().putBoolean("generation_in_progress", false).apply();
                     status.setText("Generation failed: " + safeMessage(e));
                     setGenerating(false);
                 });
@@ -963,20 +985,23 @@ public class MainActivity extends Activity {
         if (p < 0 || p >= MODEL_PROFILES.length) p = 0;
         if (profileInfo != null) profileInfo.setText(profileDescription(p));
 
+        repairFlux2SlotAssignment(p);
+
         int steps = 20;
         float cfg = 7.0f;
         float distilled = 3.5f;
+        int canvasIndex = 2;
         switch (p) {
             case 1:
-                steps = 4; cfg = 1.0f; distilled = 3.5f; break;
+                steps = 4; cfg = 1.0f; distilled = 3.5f; canvasIndex = 0; break;
             case 2:
-                steps = 20; cfg = 4.0f; distilled = 3.5f; break;
+                steps = 20; cfg = 4.0f; distilled = 3.5f; canvasIndex = 0; break;
             case 3:
-                steps = 4; cfg = 1.0f; distilled = 3.5f; break;
+                steps = 4; cfg = 1.0f; distilled = 3.5f; canvasIndex = 0; break;
             case 4:
-                steps = 20; cfg = 4.0f; distilled = 3.5f; break;
+                steps = 20; cfg = 4.0f; distilled = 3.5f; canvasIndex = 0; break;
             case 5:
-                steps = 20; cfg = 1.0f; distilled = 3.5f; break;
+                steps = 20; cfg = 1.0f; distilled = 3.5f; canvasIndex = 0; break;
             case 6:
                 steps = 20; cfg = 1.0f; distilled = 3.5f; break;
             case 7:
@@ -988,15 +1013,17 @@ public class MainActivity extends Activity {
             setSteps(steps);
             setTextCfg(cfg);
             setDistilledGuidance(distilled);
+            if (sizeSpinner != null && isFlux2Profile(p)) sizeSpinner.setSelection(canvasIndex);
         }
-        refreshModelSummary();
+        if (!roleValues.isEmpty()) refreshModelRows();
+        else refreshModelSummary();
         refreshGenerateEnabled();
     }
 
     private String profileDescription(int p) {
         switch (p) {
             case 1:
-                return "BEST PHONE FIT · FLUX.2 Klein 4B\nImport: diffusion + FLUX.2 VAE/AE + Qwen3 4B in the LLM slot. Q4-class GGUF is the sensible target. Distilled 4-step model.";
+                return "BEST PHONE FIT · FLUX.2 Klein 4B\nImport the Klein GGUF under Diffusion / transformer, plus FLUX.2 VAE/AE and Qwen3 4B under LLM. The app uses mobile-safe streamed Vulkan residency and starts at 512².";
             case 2:
                 return "QUALITY PHONE PROFILE · FLUX.2 Klein Base 4B\nSame files as Klein 4B, but the base model is intended for a fuller ~20-step sampling run and higher CFG.";
             case 3:
@@ -1034,22 +1061,82 @@ public class MainActivity extends Activity {
         distilledValue.setText(String.format(Locale.US, "%.1f", clamped));
     }
 
-    private String missingProfileFiles() {
-        // A full checkpoint is treated as self-contained. Split stacks are validated by profile.
-        if (!prefPath("model").isEmpty()) return "";
+    private int currentProfile() {
+        return Math.max(0, Math.min(MODEL_PROFILES.length - 1, prefs.getInt("model_profile", 1)));
+    }
 
-        int profile = prefs.getInt("model_profile", 1);
-        profile = Math.max(0, Math.min(MODEL_PROFILES.length - 1, profile));
+    private boolean isFlux2Profile(int profile) {
+        return profile >= 1 && profile <= 5;
+    }
+
+    private String storedName(String role) {
+        String path = prefPath(role);
+        if (path.isEmpty()) return "";
+        return prefs.getString(role + "_name", new File(path).getName());
+    }
+
+    private boolean looksLikeFlux2Diffusion(String name) {
+        String n = name == null ? "" : name.toLowerCase(Locale.US);
+        boolean flux2 = n.contains("flux-2") || n.contains("flux2") || n.contains("flux.2");
+        return flux2 && (n.contains("klein") || n.contains("dev"));
+    }
+
+    private boolean looksLikeQwen35(String name) {
+        String n = name == null ? "" : name.toLowerCase(Locale.US)
+                .replace("_", "").replace("-", "").replace(".", "");
+        return n.contains("qwen35");
+    }
+
+    private String modelFileProblem(String role, String displayName) {
+        int profile = currentProfile();
+        if (isFlux2Profile(profile) && "model".equals(role)) {
+            return "FLUX.2 is a split model in this app. Put the diffusion GGUF under Diffusion / transformer.";
+        }
+        if (isFlux2Profile(profile) && "llm".equals(role) && looksLikeQwen35(displayName)) {
+            return "Qwen3.5 is not the FLUX.2 Klein text encoder supported by this runtime. Use Qwen3 4B for Klein 4B or Qwen3 8B for Klein 9B.";
+        }
+        return "";
+    }
+
+    private void repairFlux2SlotAssignment(int profile) {
+        if (!isFlux2Profile(profile)) return;
+        String modelPath = prefPath("model");
+        if (modelPath.isEmpty() || !prefPath("diffusion").isEmpty()) return;
+
+        String modelName = prefs.getString("model_name", new File(modelPath).getName());
+        if (!looksLikeFlux2Diffusion(modelName)) return;
+
+        long bytes = prefs.getLong("model_bytes", new File(modelPath).length());
+        prefs.edit()
+                .putString("diffusion_path", modelPath)
+                .putString("diffusion_name", modelName)
+                .putLong("diffusion_bytes", bytes)
+                .remove("model_path").remove("model_name").remove("model_bytes")
+                .apply();
+        nativeUnload();
+    }
+
+    private String missingProfileFiles() {
+        int profile = currentProfile();
+
+        // Only Auto/custom and generic modes may treat a Full checkpoint as self-contained.
+        if (!isFlux2Profile(profile) && !prefPath("model").isEmpty()) return "";
 
         java.util.ArrayList<String> missing = new java.util.ArrayList<>();
+
+        if (isFlux2Profile(profile) && !prefPath("model").isEmpty()) {
+            missing.add("move FLUX.2 from Full checkpoint to Diffusion / transformer");
+        }
         if (prefPath("diffusion").isEmpty()) missing.add("diffusion / transformer");
 
-        if (profile >= 1 && profile <= 5) {
+        if (isFlux2Profile(profile)) {
             if (prefPath("vae").isEmpty()) missing.add("FLUX.2 VAE / AE");
             if (prefPath("llm").isEmpty()) {
                 if (profile == 5) missing.add("Mistral text encoder in LLM slot");
                 else if (profile == 3 || profile == 4) missing.add("Qwen3 8B in LLM slot");
                 else missing.add("Qwen3 4B in LLM slot");
+            } else if (looksLikeQwen35(storedName("llm"))) {
+                missing.add("replace Qwen3.5 with the required Qwen3 encoder");
             }
         } else if (profile == 6 || profile == 7) {
             if (prefPath("vae").isEmpty()) missing.add("VAE / AE");
@@ -1244,6 +1331,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        prefs.edit().putBoolean("generation_in_progress", false).apply();
         nativeCancel();
         worker.shutdownNow();
         super.onDestroy();
