@@ -14,10 +14,12 @@ git -C vendor/stable-diffusion.cpp checkout "$SD_COMMIT"
 git -C vendor/stable-diffusion.cpp submodule update --init --recursive
 
 # Local Flux Studio mobile performance patch for the pinned runtime.
-# FLUX.2 Klein upstream pads Qwen3 to 512 input tokens before running all 36 layers.
-# On mobile CPU that makes even tiny prompts unnecessarily expensive. The app can
-# instead run Qwen on a smaller minimum sequence and zero-pad the resulting hidden
-# states to 512 afterwards, using the runtime's existing hidden_states_min_length path.
+# FLUX.2 Klein upstream pads Qwen3 to 512 input tokens before running the
+# transformer. The app exposes selectable mobile strategies that can instead
+# run Qwen on the prompt's real length or a smaller minimum, then use the
+# runtime's existing hidden_states_min_length path to restore a 512-position
+# conditioning tensor before FLUX diffusion. An optional early-state preset
+# also requests layers 6/12/18 instead of the trained 9/18/27 states.
 python3 - <<'PY'
 from pathlib import Path
 
@@ -33,32 +35,40 @@ old = '''        } else if (version == VERSION_FLUX2_KLEIN) {
 '''
 new = '''        } else if (version == VERSION_FLUX2_KLEIN) {
             prompt_template_encode_start_idx = 0;
-            const char* localflux_cond_mode  = std::getenv("LOCALFLUX_KLEIN_COND_MODE");
-            if (localflux_cond_mode && localflux_cond_mode[0] == '0') {
-                // Fast mobile mode: keep a small Qwen minimum, then use the existing
-                // post-encoder zero padding path so FLUX still receives 512 positions.
-                min_length               = 64;
-                hidden_states_min_length = 512;
-                LOG_INFO("LocalFlux Klein conditioning: Qwen min 64 -> zero-pad embeddings to 512");
-            } else if (localflux_cond_mode && localflux_cond_mode[0] == '1') {
-                // Balanced mode retains more padded Qwen context while avoiding the
-                // full 512-token transformer cost on normal short prompts.
-                min_length               = 128;
-                hidden_states_min_length = 512;
-                LOG_INFO("LocalFlux Klein conditioning: Qwen min 128 -> zero-pad embeddings to 512");
-            } else {
-                // Reference/upstream behavior for quality comparisons and fallbacks.
-                min_length               = 512;
-                LOG_INFO("LocalFlux Klein conditioning: upstream full 512-token Qwen");
+
+            // Local Flux Studio: the upstream Klein path always expands the Qwen
+            // sequence to 512 tokens before transformer compute. On a phone this
+            // dominates latency. Keep the diffusion-facing tensor at >=512, but
+            // allow the Qwen graph itself to use the real prompt length or a
+            // smaller configurable minimum.
+            int localflux_min_tokens = 512;
+            if (const char* value = std::getenv("LOCALFLUX_KLEIN_MIN_TOKENS")) {
+                char* end = nullptr;
+                long parsed = std::strtol(value, &end, 10);
+                if (end != value) {
+                    localflux_min_tokens = static_cast<int>(std::max(0L, std::min(512L, parsed)));
+                }
             }
-            out_layers                       = {9, 18, 27};
+            min_length               = localflux_min_tokens;
+            hidden_states_min_length = 512;
+
+            const bool localflux_early_layers = [] {
+                const char* value = std::getenv("LOCALFLUX_KLEIN_EARLY_LAYERS");
+                return value != nullptr && value[0] == '1';
+            }();
+            out_layers = localflux_early_layers
+                    ? std::set<int>{6, 12, 18}
+                    : std::set<int>{9, 18, 27};
+
+            LOG_INFO("LocalFlux Klein conditioning: Qwen min=%d, embeddings>=512, states=%s",
+                     min_length,
+                     localflux_early_layers ? "6/12/18 (experimental)" : "9/18/27");
 '''
 if old not in s:
     raise SystemExit("Pinned conditioner layout changed; refusing to apply LocalFlux Klein patch")
 s = s.replace(old, new, 1)
 p.write_text(s)
 PY
-
 git clone https://github.com/Parasaran-Python/android-face-fusion vendor/android-face-fusion
 git -C vendor/android-face-fusion checkout "$FACE_COMMIT"
 
