@@ -241,11 +241,11 @@ public class MainActivity extends Activity {
         LinearLayout card = card();
         card.addView(sectionTitle("2 · Generate"));
 
-        promptInput = input("Prompt", 4);
+        card.addView(fieldLabel("Prompt"));\n        promptInput = input(4);
         promptInput.setHint("dark fantasy knight beneath a blood-red eclipse, intricate armor, dramatic chiaroscuro…");
         card.addView(promptInput);
 
-        negativeInput = input("Negative prompt (optional)", 2);
+        card.addView(fieldLabel("Negative prompt (optional)"));\n        negativeInput = input(2);
         negativeInput.setHint("low quality, artifacts, extra fingers…");
         card.addView(negativeInput);
 
@@ -283,7 +283,7 @@ public class MainActivity extends Activity {
         guidanceBar.setOnSeekBarChangeListener(simpleSeek(v -> guidanceValue.setText(String.format(Locale.US, "%.1f", 1.0f + v / 10f))));
         card.addView(guidanceBar);
 
-        seedInput = input("Seed (-1 = random)", 1);
+        card.addView(fieldLabel("Seed (-1 = random)"));\n        seedInput = input(1);
         seedInput.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED);
         seedInput.setText("-1");
         card.addView(seedInput);
@@ -776,11 +776,7 @@ public class MainActivity extends Activity {
         return v;
     }
 
-    private EditText input(String label, int lines) {
-        LinearLayout holder = column();
-        TextView l = fieldLabel(label);
-        holder.addView(l);
-
+    private EditText input(int lines) {
         EditText e = new EditText(this);
         e.setTextColor(TEXT);
         e.setHintTextColor(Color.rgb(108, 113, 132));
@@ -790,28 +786,7 @@ public class MainActivity extends Activity {
         e.setMaxLines(Math.max(lines, 6));
         e.setPadding(dp(12), dp(10), dp(12), dp(10));
         e.setBackground(roundRect(CARD_2, 12, Color.rgb(57, 61, 79)));
-        holder.addView(e, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-
-        // Return EditText while inserting holder through a lightweight wrapper trick.
-        // The caller adds the EditText directly, so store the label in its contentDescription.
-        e.setContentDescription(label);
-        e.setTag(holder);
-        return new LabeledEditTextProxy(this, holder, e);
-    }
-
-    /**
-     * EditText subclass whose actual view is still a normal EditText. The proxy exists so callers can
-     * add one object while we retain a label above it without XML.
-     */
-    private static class LabeledEditTextProxy extends EditText {
-        final LinearLayout holder;
-        final EditText delegate;
-        LabeledEditTextProxy(MainActivity c, LinearLayout holder, EditText delegate) {
-            super(c);
-            this.holder = holder;
-            this.delegate = delegate;
-        }
-        @Override public android.view.ViewParent getParent() { return super.getParent(); }
+        return e;
     }
 
     private TextView fieldLabel(String s) {
