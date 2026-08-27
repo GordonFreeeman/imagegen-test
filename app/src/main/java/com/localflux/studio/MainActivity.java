@@ -720,10 +720,12 @@ public class MainActivity extends Activity {
                 else if (oldMode == 3) savedTeMode = 9;
                 else if (oldMode == 4) savedTeMode = 10;
                 else savedTeMode = 0;
-            } else {
-                // Legacy backend-only schemas: old Vulkan -> Vulkan reference,
-                // old disk -> disk reference, everything else -> Fast CPU.
+            } else if (teSchema == 2) {
+                // v1.3.2: 0=optimized CPU, 1=Vulkan, 2=disk.
                 savedTeMode = oldMode == 1 ? 9 : (oldMode == 2 ? 10 : 0);
+            } else {
+                // v1.3.1 and older: 0=Vulkan, 1=CPU, 2=disk.
+                savedTeMode = oldMode == 0 ? 9 : (oldMode == 2 ? 10 : 0);
             }
             prefs.edit()
                     .putInt("text_encoder_mode", savedTeMode)
