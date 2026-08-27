@@ -837,8 +837,17 @@ public class MainActivity extends Activity {
     }
 
     private void startGeneration() {
-        String model = prefPath("model");
+        int profile = currentProfile();
+        boolean flux2 = isFlux2Profile(profile);
+        boolean flux1 = profile == 6 || profile == 7;
+
+        String model = (flux2 || flux1) ? "" : prefPath("model");
         String diffusion = prefPath("diffusion");
+        String vae = prefPath("vae");
+        String clipL = flux2 ? "" : prefPath("clip_l");
+        String t5 = flux2 ? "" : prefPath("t5");
+        String llm = flux1 ? "" : prefPath("llm");
+
         String missing = missingProfileFiles();
         if (!missing.isEmpty()) {
             toast("Model setup incomplete: " + missing);
@@ -877,7 +886,7 @@ public class MainActivity extends Activity {
         worker.execute(() -> {
             try {
                 int[] pixels = nativeGenerate(
-                        model, diffusion, prefPath("vae"), prefPath("clip_l"), prefPath("t5"), prefPath("llm"),
+                        model, diffusion, vae, clipL, t5, llm,
                         prompt, negativeInput.getText().toString(), width, height, steps,
                         textCfg, distilledGuidance, finalSeed, vaeTilingCheck.isChecked(),
                         livePreviewCheck.isChecked(), selectedPreviewInterval(),
