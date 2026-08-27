@@ -194,6 +194,7 @@ public class MainActivity extends Activity {
     private volatile boolean diagnosticsStopped = false;
     private volatile boolean diagnosticsBusy = false;
     private volatile long lastNativeEventUptimeMs = 0L;
+    private volatile String lastNativeLine = "";
     private long lastTelemetryConsoleMs = 0L;
     private long prevProcessCpuMs = -1L;
     private long prevProcessWallMs = -1L;
@@ -245,6 +246,13 @@ public class MainActivity extends Activity {
                 } catch (Throwable ignored) {}
                 if (nativeLogs != null && !nativeLogs.trim().isEmpty()) {
                     lastNativeEventUptimeMs = SystemClock.elapsedRealtime();
+                    String[] nativeLines = nativeLogs.replace("\r", "").split("\n");
+                    for (int i = nativeLines.length - 1; i >= 0; i--) {
+                        if (!nativeLines[i].trim().isEmpty()) {
+                            lastNativeLine = nativeLines[i].trim();
+                            break;
+                        }
+                    }
                 }
                 telemetry = collectTelemetry();
                 final String logs = nativeLogs;
@@ -366,10 +374,10 @@ public class MainActivity extends Activity {
         modelsTab.setOnClickListener(v -> switchTab(1));
         faceTab.setOnClickListener(v -> switchTab(2));
         consoleTab.setOnClickListener(v -> switchTab(3));
-        nav.addView(createTab, new LinearLayout.LayoutParams(dp(100), dp(46)));
-        nav.addView(modelsTab, new LinearLayout.LayoutParams(dp(100), dp(46)));
-        nav.addView(faceTab, new LinearLayout.LayoutParams(dp(112), dp(46)));
-        nav.addView(consoleTab, new LinearLayout.LayoutParams(dp(104), dp(46)));
+        nav.addView(createTab, new LinearLayout.LayoutParams(dp(80), dp(46)));
+        nav.addView(modelsTab, new LinearLayout.LayoutParams(dp(80), dp(46)));
+        nav.addView(faceTab, new LinearLayout.LayoutParams(dp(98), dp(46)));
+        nav.addView(consoleTab, new LinearLayout.LayoutParams(dp(90), dp(46)));
         navScroll.addView(nav);
         root.addView(navScroll, matchWrap());
 
@@ -1327,6 +1335,23 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void flushPendingNativeLogs() {
+        try {
+            String pending = nativeDrainLogs();
+            if (pending != null && !pending.isEmpty()) {
+                lastNativeEventUptimeMs = SystemClock.elapsedRealtime();
+                String[] lines = pending.replace("\r", "").split("\n");
+                for (int i = lines.length - 1; i >= 0; i--) {
+                    if (!lines[i].trim().isEmpty()) {
+                        lastNativeLine = lines[i].trim();
+                        break;
+                    }
+                }
+                appendConsoleRaw(pending);
+            }
+        } catch (Throwable ignored) {}
+    }
+
     private void clearConsole() {
         consoleBuffer.setLength(0);
         try { nativeDrainLogs(); } catch (Throwable ignored) {}
@@ -1334,6 +1359,7 @@ public class MainActivity extends Activity {
     }
 
     private void copyConsole() {
+        flushPendingNativeLogs();
         ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
         if (clipboard == null) {
             toast("Clipboard service unavailable.");
@@ -1344,6 +1370,7 @@ public class MainActivity extends Activity {
     }
 
     private void saveConsoleLog() {
+        flushPendingNativeLogs();
         String log = consoleBuffer.toString();
         if (log.isEmpty()) log = "Local Flux Studio console is empty.\n";
         final String content = log;
@@ -1434,10 +1461,21 @@ public class MainActivity extends Activity {
         String thermalLine = "Thermal " + thermalText(thermal)
                 + (Float.isNaN(batteryTemp) ? "" : String.format(Locale.US, " · battery %.1f°C", batteryTemp))
                 + " | native log " + (nativeAge < 0 ? "none yet" : formatDurationShort(nativeAge) + " ago");
+        String nativeLine = lastNativeLine == null || lastNativeLine.isEmpty()
+                ? "Last native: none yet"
+                : "Last native: " + truncateTelemetry(lastNativeLine, 118);
 
-        String display = runLine + "\n" + cpuLine + "\n" + memoryLine + "\n" + heapLine + "\n" + gpuLine + "\n" + thermalLine;
-        String compact = runLine + " | " + cpuLine + " | " + memoryLine + " | " + gpuLine + " | " + thermalLine;
+        String display = runLine + "\n" + cpuLine + "\n" + memoryLine + "\n" + heapLine + "\n" + gpuLine + "\n" + thermalLine + "\n" + nativeLine;
+        String compact = runLine + " | " + cpuLine + " | " + memoryLine + " | " + gpuLine + " | " + thermalLine
+                + " | " + nativeLine;
         return new TelemetrySnapshot(display, compact);
+    }
+
+    private String truncateTelemetry(String value, int max) {
+        if (value == null) return "";
+        String compact = value.replace("\n", " ").replace("\r", " ").trim();
+        if (compact.length() <= max) return compact;
+        return compact.substring(0, Math.max(0, max - 1)) + "…";
     }
 
     private String percentOrNA(double value) {
