@@ -635,3 +635,57 @@ Both reviewers approved application commit `5b92697ae7050aeae8f2ae1b8ed3e3da4479
 CI run `33081163359` verified package `com.localflux.studio`, versionCode `7`, versionName `1.3.0`, targetSdk `36`, minSdk `29`, 16 KB alignment, and persistent signer SHA-256:
 
 `6c4c89639285c16e367171b085115e436459644714eb81d4c22fd6e2164e879c`
+
+
+# v1.3.1 Qwen Vulkan Acceleration Review
+
+Final reviewed application commit: `5d1c03a3ab9e05a2da0b8a614b8772f50175a87f`  
+Successful CI run: `33085823476`  
+APK version: 1.3.1 (versionCode 8), targetSdk 36, minSdk 29.
+
+## Logic Inquisitor
+
+**Verdict:** APPROVED
+
+**Blocking findings:**
+- None.
+
+**Non-blocking improvements:**
+- A real-device benchmark should compare Vulkan Qwen against CPU RAM on the Adreno 830 and record prompt-encoding wall time for representative prompt lengths.
+- If a specific Vulkan Qwen kernel is unsupported by the vendor driver, the app's CPU RAM mode remains the compatibility fallback without requiring model re-import.
+
+**Verification performed:**
+- Inspected the final native context key and verified changing text-encoder mode invalidates/reloads the cached inference context.
+- Verified text-encoder modes:
+  - mode 0: runtime `te=gpu`, parameters `te=cpu`
+  - mode 1: runtime `te=cpu`, parameters `te=cpu`
+  - mode 2: runtime `te=cpu`, parameters `te=disk`
+- Verified diffusion remains Vulkan-backed with CPU parameters, `max_vram=-1`, and `stream_layers=true`.
+- Verified VAE remains on CPU.
+- Verified the backend documentation explicitly supports independent `te` runtime placement and CPU parameter staging to a GPU runtime.
+- Verified the previous boolean RAM-saver preference migrates to the new 3-mode selector.
+- Verified the selector is snapshotted and locked during generation.
+- Verified telemetry/console generation summary reports the selected Qwen backend.
+- GitHub Actions run 33085823476 completed native compilation, Java compilation, lint, APK assembly, SDK metadata checks, 16 KB alignment, and stable signer verification.
+- CI reported `BUILD SUCCESSFUL`, versionCode 8, versionName 1.3.1, targetSdk 36, and signer SHA-256 `6c4c89639285c16e367171b085115e436459644714eb81d4c22fd6e2164e879c`.
+
+## Aesthetic Executioner
+
+**Verdict:** APPROVED
+
+**Blocking findings:**
+- None.
+
+**Non-blocking improvements:**
+- A physical-device pass can refine the wording/width of the three backend choices if OEM font scaling makes the spinner verbose.
+
+**Verification performed:**
+- Inspected the supplied portrait telemetry screenshot from v1.3.0 as the observable baseline.
+- Inspected the complete final Create-screen code after replacing the RAM-saver checkbox with the text-encoder backend selector.
+- Verified the selector remains inside the existing scroll layout and does not alter the tab/header/result hierarchy.
+- Verified the new explanatory text clearly distinguishes fastest/recommended, compatibility, and minimum-RAM modes.
+- No Android emulator or physical-device rendering was available in the build environment.
+
+## Final status
+
+Both reviewers approved the v1.3.1 application commit `5d1c03a3ab9e05a2da0b8a614b8772f50175a87f`. This review-log update does not alter application code or APK resources.
