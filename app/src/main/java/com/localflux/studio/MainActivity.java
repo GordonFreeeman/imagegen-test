@@ -13,7 +13,10 @@ import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.PowerManager;
+import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.text.InputType;
@@ -59,7 +62,10 @@ public class MainActivity extends Activity {
     private static native int[] nativeGenerate(
             String model, String diffusion, String vae, String clipL, String t5, String llm,
             String prompt, String negative, int width, int height, int steps,
-            float textCfg, float distilledGuidance, long seed, boolean vaeTiling);
+            float textCfg, float distilledGuidance, long seed, boolean vaeTiling,
+            boolean livePreview, int previewInterval);
+    private static native int[] nativeProgressSnapshot();
+    private static native int[] nativePreviewSnapshot(int lastVersion);
     private static native void nativeCancel();
     private static native void nativeUnload();
 
@@ -100,6 +106,9 @@ public class MainActivity extends Activity {
     private EditText promptInput;
     private EditText negativeInput;
     private Spinner sizeSpinner;
+    private LinearLayout customSizeRow;
+    private EditText customWidthInput;
+    private EditText customHeightInput;
     private SeekBar stepsBar;
     private TextView stepsValue;
     private SeekBar cfgBar;
@@ -108,9 +117,12 @@ public class MainActivity extends Activity {
     private TextView distilledValue;
     private EditText seedInput;
     private CheckBox vaeTilingCheck;
+    private CheckBox livePreviewCheck;
+    private Spinner previewIntervalSpinner;
     private Button generateButton;
     private Button cancelButton;
     private ProgressBar progress;
+    private TextView progressTitle;
     private TextView status;
     private ImageView resultImage;
     private Button saveButton;
@@ -139,6 +151,30 @@ public class MainActivity extends Activity {
     private FaceEmbedder faceEmbedder;
     private FaceSwapper faceSwapper;
     private FaceFusionProcessor faceProcessor;
+
+    private final Handler uiHandler = new Handler(Looper.getMainLooper());
+    private volatile boolean generationActive = false;
+    private int lastPreviewVersion = 0;
+    private int lastProgressPhase = -1;
+    private int lastProgressStep = -1;
+    private long lastProgressChangeMs = 0L;
+
+    private final Runnable progressPoller = new Runnable() {
+        @Override public void run() {
+            if (!generationActive) return;
+            try {
+                int[] snapshot = nativeProgressSnapshot();
+                renderProgressSnapshot(snapshot);
+                if (livePreviewCheck != null && livePreviewCheck.isChecked()) {
+                    int[] preview = nativePreviewSnapshot(lastPreviewVersion);
+                    renderPreviewSnapshot(preview);
+                }
+            } catch (Throwable ignored) {
+                // The worker thread owns the actual generation error path.
+            }
+            if (generationActive) uiHandler.postDelayed(this, 300);
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -368,9 +404,48 @@ public class MainActivity extends Activity {
         card.addView(negativeInput);
 
         card.addView(fieldLabel("Canvas"));
-        sizeSpinner = styledSpinner(new String[]{"512 × 512", "640 × 640", "768 × 768", "896 × 896", "1024 × 1024"});
+        sizeSpinner = styledSpinner(new String[]{
+                "512 × 512", "640 × 640", "768 × 768", "896 × 896", "1024 × 1024",
+                "768 × 1024 · portrait", "1024 × 768 · landscape", "Custom…"
+        });
         sizeSpinner.setSelection(2);
         card.addView(sizeSpinner, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(54)));
+
+        customSizeRow = new LinearLayout(this);
+        customSizeRow.setOrientation(LinearLayout.HORIZONTAL);
+        customSizeRow.setPadding(0, dp(8), 0, 0);
+
+        LinearLayout widthColumn = column();
+        widthColumn.addView(fieldLabel("Width"));
+        customWidthInput = input(1);
+        customWidthInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+        customWidthInput.setText("768");
+        widthColumn.addView(customWidthInput);
+
+        LinearLayout heightColumn = column();
+        heightColumn.addView(fieldLabel("Height"));
+        customHeightInput = input(1);
+        customHeightInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+        customHeightInput.setText("768");
+        heightColumn.addView(customHeightInput);
+
+        customSizeRow.addView(widthColumn, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout.LayoutParams heightLp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        heightLp.setMarginStart(dp(8));
+        customSizeRow.addView(heightColumn, heightLp);
+        customSizeRow.setVisibility(View.GONE);
+        card.addView(customSizeRow);
+
+        TextView sizeHint = text("Custom dimensions: 256–1536 px per side, in multiples of 64.", 11, MUTED, false);
+        sizeHint.setPadding(dp(2), dp(5), dp(2), 0);
+        card.addView(sizeHint);
+
+        sizeSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
+                if (customSizeRow != null) customSizeRow.setVisibility(position == 7 ? View.VISIBLE : View.GONE);
+            }
+            @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
+        });
 
         TextView samplingTitle = text("SAMPLING", 11, ACCENT_2, true);
         samplingTitle.setLetterSpacing(0.1f);
@@ -417,8 +492,27 @@ public class MainActivity extends Activity {
         vaeTilingCheck.setText("Memory saver · VAE tiling");
         vaeTilingCheck.setTextColor(TEXT);
         vaeTilingCheck.setChecked(true);
-        vaeTilingCheck.setPadding(0, dp(7), 0, dp(10));
+        vaeTilingCheck.setPadding(0, dp(7), 0, dp(4));
         card.addView(vaeTilingCheck);
+
+        livePreviewCheck = new CheckBox(this);
+        livePreviewCheck.setText("Live denoising preview");
+        livePreviewCheck.setTextColor(TEXT);
+        livePreviewCheck.setChecked(false);
+        livePreviewCheck.setPadding(0, dp(2), 0, dp(4));
+        card.addView(livePreviewCheck);
+
+        previewIntervalSpinner = styledSpinner(new String[]{
+                "Preview every step", "Preview every 2 steps", "Preview every 4 steps"
+        });
+        previewIntervalSpinner.setSelection(0);
+        previewIntervalSpinner.setEnabled(false);
+        card.addView(previewIntervalSpinner, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(50)));
+        livePreviewCheck.setOnCheckedChangeListener((button, checked) -> previewIntervalSpinner.setEnabled(checked));
+
+        TextView previewHint = text("Projected previews are approximate and add some overhead. Disable them for maximum speed and memory headroom.", 11, MUTED, false);
+        previewHint.setPadding(dp(2), dp(4), dp(2), dp(10));
+        card.addView(previewHint);
 
         generateButton = primaryButton("✦  Generate locally");
         generateButton.setOnClickListener(v -> startGeneration());
@@ -434,15 +528,19 @@ public class MainActivity extends Activity {
         cancelLp.topMargin = dp(8);
         card.addView(cancelButton, cancelLp);
 
-        progress = new ProgressBar(this);
+        progressTitle = text("Waiting", 12, ACCENT_2, true);
+        progressTitle.setGravity(Gravity.CENTER_HORIZONTAL);
+        progressTitle.setPadding(0, dp(12), 0, dp(5));
+        progressTitle.setVisibility(View.GONE);
+        card.addView(progressTitle);
+
+        progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        progress.setMax(100);
         progress.setIndeterminate(true);
         progress.setVisibility(View.GONE);
-        LinearLayout.LayoutParams pp = new LinearLayout.LayoutParams(dp(34), dp(34));
-        pp.gravity = Gravity.CENTER_HORIZONTAL;
-        pp.topMargin = dp(13);
-        card.addView(progress, pp);
+        card.addView(progress, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(10)));
 
-        status = text("Ready. FLUX.2 Klein 4B Q4 at 768² is the recommended starting point for a 16 GB phone.", 12, MUTED, false);
+        status = text("Ready. FLUX.2 Klein 4B Q4 at 512² is the safest first run on a 16 GB phone.", 12, MUTED, false);
         status.setGravity(Gravity.CENTER_HORIZONTAL);
         status.setPadding(dp(5), dp(9), dp(5), dp(12));
         card.addView(status);
@@ -673,8 +771,10 @@ public class MainActivity extends Activity {
             return;
         }
 
-        int[] sizes = {512, 640, 768, 896, 1024};
-        int side = sizes[Math.max(0, sizeSpinner.getSelectedItemPosition())];
+        int[] dimensions = selectedDimensions();
+        if (dimensions == null) return;
+        int width = dimensions[0];
+        int height = dimensions[1];
         int steps = stepsBar.getProgress() + 4;
         float textCfg = 0.5f + cfgBar.getProgress() / 10f;
         float distilledGuidance = distilledBar.getProgress() / 10f;
@@ -698,23 +798,25 @@ public class MainActivity extends Activity {
             try {
                 int[] pixels = nativeGenerate(
                         model, diffusion, prefPath("vae"), prefPath("clip_l"), prefPath("t5"), prefPath("llm"),
-                        prompt, negativeInput.getText().toString(), side, side, steps,
-                        textCfg, distilledGuidance, finalSeed, vaeTilingCheck.isChecked());
-                if (pixels == null || pixels.length != side * side) {
+                        prompt, negativeInput.getText().toString(), width, height, steps,
+                        textCfg, distilledGuidance, finalSeed, vaeTilingCheck.isChecked(),
+                        livePreviewCheck.isChecked(), selectedPreviewInterval());
+                if (pixels == null || pixels.length != width * height) {
                     throw new Exception("Native generator returned no image");
                 }
-                Bitmap b = Bitmap.createBitmap(pixels, side, side, Bitmap.Config.ARGB_8888);
+                Bitmap b = Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888);
                 runOnUiThread(() -> {
                     prefs.edit().putBoolean("generation_in_progress", false).apply();
                     currentBitmap = b;
                     resultImage.setImageBitmap(b);
                     saveButton.setEnabled(true);
-                    status.setText("Done. Model stays cached in RAM for the next generation.");
+                    status.setText("Done · " + width + " × " + height + ". Model stays cached in RAM for the next generation.");
                     setGenerating(false);
                 });
             } catch (Throwable e) {
                 runOnUiThread(() -> {
                     prefs.edit().putBoolean("generation_in_progress", false).apply();
+                    status.setTextColor(DANGER);
                     status.setText("Generation failed: " + safeMessage(e));
                     setGenerating(false);
                 });
@@ -722,16 +824,161 @@ public class MainActivity extends Activity {
         });
     }
 
+    private int[] selectedDimensions() {
+        int position = sizeSpinner == null ? 0 : sizeSpinner.getSelectedItemPosition();
+        int[][] presets = {
+                {512, 512}, {640, 640}, {768, 768}, {896, 896}, {1024, 1024},
+                {768, 1024}, {1024, 768}
+        };
+        if (position >= 0 && position < presets.length) return presets[position];
+
+        int width;
+        int height;
+        try {
+            width = Integer.parseInt(customWidthInput.getText().toString().trim());
+            height = Integer.parseInt(customHeightInput.getText().toString().trim());
+        } catch (Exception e) {
+            toast("Enter numeric custom width and height.");
+            return null;
+        }
+        if (width < 256 || height < 256 || width > 1536 || height > 1536) {
+            toast("Custom width and height must be between 256 and 1536.");
+            return null;
+        }
+        if (width % 64 != 0 || height % 64 != 0) {
+            toast("Custom width and height must be divisible by 64.");
+            return null;
+        }
+        return new int[]{width, height};
+    }
+
+    private int selectedPreviewInterval() {
+        int position = previewIntervalSpinner == null ? 0 : previewIntervalSpinner.getSelectedItemPosition();
+        if (position == 1) return 2;
+        if (position == 2) return 4;
+        return 1;
+    }
+
+    private String formatElapsed(int ms) {
+        int totalSeconds = Math.max(0, ms / 1000);
+        int minutes = totalSeconds / 60;
+        int seconds = totalSeconds % 60;
+        return String.format(Locale.US, "%d:%02d", minutes, seconds);
+    }
+
+    private void renderProgressSnapshot(int[] snapshot) {
+        if (!generationActive || snapshot == null || snapshot.length < 6) return;
+
+        int phase = snapshot[0];
+        int step = snapshot[1];
+        int steps = snapshot[2];
+        int elapsed = snapshot[3];
+
+        if (phase != lastProgressPhase || step != lastProgressStep) {
+            lastProgressPhase = phase;
+            lastProgressStep = step;
+            lastProgressChangeMs = SystemClock.elapsedRealtime();
+        }
+
+        long unchangedMs = Math.max(0L, SystemClock.elapsedRealtime() - lastProgressChangeMs);
+        String stall = "";
+        if (unchangedMs >= 180_000L && phase >= 1 && phase <= 4) {
+            stall = " · no new native progress event for " + formatElapsed((int)Math.min(Integer.MAX_VALUE, unchangedMs))
+                    + " (slow does not necessarily mean frozen)";
+        }
+
+        String elapsedText = " · " + formatElapsed(elapsed);
+        switch (phase) {
+            case 1:
+                progress.setIndeterminate(true);
+                progressTitle.setText("Loading model stack" + elapsedText);
+                status.setText("Loading weights and preparing backends" + stall);
+                break;
+            case 2:
+                progress.setIndeterminate(true);
+                progressTitle.setText("Encoding prompt / preparing latents" + elapsedText);
+                status.setText("Text encoder and conditioning are running" + stall);
+                break;
+            case 3:
+                progress.setIndeterminate(false);
+                progress.setMax(Math.max(1, steps));
+                progress.setProgress(Math.max(0, Math.min(step, Math.max(1, steps))));
+                progressTitle.setText("Sampling · step " + Math.max(0, step) + " / " + Math.max(1, steps) + elapsedText);
+                status.setText("Diffusion sampling on the configured backend" + stall);
+                break;
+            case 4:
+                progress.setIndeterminate(true);
+                progressTitle.setText("Decoding final image" + elapsedText);
+                status.setText("VAE decode / final image conversion" + stall);
+                break;
+            case 5:
+                progress.setIndeterminate(false);
+                progress.setMax(100);
+                progress.setProgress(100);
+                progressTitle.setText("Complete" + elapsedText);
+                break;
+            case 6:
+                progress.setIndeterminate(false);
+                progressTitle.setText("Cancelling…" + elapsedText);
+                break;
+            case 7:
+                progress.setIndeterminate(false);
+                progressTitle.setText("Generation error" + elapsedText);
+                break;
+            default:
+                progress.setIndeterminate(true);
+                progressTitle.setText("Starting…" + elapsedText);
+                break;
+        }
+    }
+
+    private void renderPreviewSnapshot(int[] preview) {
+        if (!generationActive || preview == null || preview.length < 4) return;
+        int version = preview[0];
+        int width = preview[1];
+        int height = preview[2];
+        if (version <= lastPreviewVersion || width <= 0 || height <= 0 ||
+                preview.length != width * height + 3) return;
+
+        try {
+            Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+            bitmap.setPixels(preview, 3, width, 0, 0, width, height);
+            resultImage.setImageBitmap(bitmap);
+            lastPreviewVersion = version;
+        } catch (Throwable ignored) {
+            // A preview is optional. Never fail the actual generation because a preview could not render.
+        }
+    }
+
     private void setGenerating(boolean active) {
+        generationActive = active;
         generateButton.setEnabled(!active && missingProfileFiles().isEmpty());
         cancelButton.setVisibility(active ? View.VISIBLE : View.GONE);
         progress.setVisibility(active ? View.VISIBLE : View.GONE);
-        if (!active) getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        progressTitle.setVisibility(active ? View.VISIBLE : View.GONE);
+
+        if (active) {
+            status.setTextColor(MUTED);
+            progress.setIndeterminate(true);
+            progressTitle.setText("Starting…");
+            lastPreviewVersion = 0;
+            lastProgressPhase = -1;
+            lastProgressStep = -1;
+            lastProgressChangeMs = SystemClock.elapsedRealtime();
+            uiHandler.removeCallbacks(progressPoller);
+            uiHandler.post(progressPoller);
+        } else {
+            uiHandler.removeCallbacks(progressPoller);
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
     }
 
     private void setBusy(boolean active, String message) {
         if (status != null) status.setText(message);
-        if (progress != null) progress.setVisibility(active ? View.VISIBLE : View.GONE);
+        if (progress != null) {
+            progress.setIndeterminate(true);
+            progress.setVisibility(active ? View.VISIBLE : View.GONE);
+        }
         if (generateButton != null) generateButton.setEnabled(!active && missingProfileFiles().isEmpty());
     }
 
@@ -1332,6 +1579,8 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        generationActive = false;
+        uiHandler.removeCallbacks(progressPoller);
         prefs.edit().putBoolean("generation_in_progress", false).apply();
         nativeCancel();
         worker.shutdownNow();
