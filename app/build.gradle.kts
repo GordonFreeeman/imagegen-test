@@ -2,6 +2,11 @@ plugins {
     id("com.android.application")
 }
 
+val stableKeystorePath = System.getenv("LOCALFLUX_KEYSTORE")
+val stableKeystorePassword = System.getenv("LOCALFLUX_KEYSTORE_PASSWORD")
+val stableKeyAlias = System.getenv("LOCALFLUX_KEY_ALIAS")
+val stableKeyPassword = System.getenv("LOCALFLUX_KEY_PASSWORD")
+
 android {
     namespace = "com.localflux.studio"
     compileSdk = 36
@@ -10,8 +15,8 @@ android {
         applicationId = "com.localflux.studio"
         minSdk = 29
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.1.1"
+        versionCode = 4
+        versionName = "1.2.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -43,12 +48,29 @@ android {
         }
     }
 
+    signingConfigs {
+        create("stableSideload") {
+            if (!stableKeystorePath.isNullOrBlank()) {
+                storeFile = file(stableKeystorePath)
+                storePassword = stableKeystorePassword
+                keyAlias = stableKeyAlias
+                keyPassword = stableKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
+            if (!stableKeystorePath.isNullOrBlank()) {
+                signingConfig = signingConfigs.getByName("stableSideload")
+            }
         }
         release {
             isMinifyEnabled = false
+            if (!stableKeystorePath.isNullOrBlank()) {
+                signingConfig = signingConfigs.getByName("stableSideload")
+            }
         }
     }
 
