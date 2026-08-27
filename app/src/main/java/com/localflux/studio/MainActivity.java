@@ -1232,6 +1232,13 @@ public class MainActivity extends Activity {
         progress.setVisibility(active ? View.VISIBLE : View.GONE);
         progressTitle.setVisibility(active ? View.VISIBLE : View.GONE);
 
+        if (vaeTilingCheck != null) vaeTilingCheck.setEnabled(!active);
+        if (extremeRamSaverCheck != null) extremeRamSaverCheck.setEnabled(!active);
+        if (livePreviewCheck != null) livePreviewCheck.setEnabled(!active);
+        if (previewIntervalSpinner != null) {
+            previewIntervalSpinner.setEnabled(!active && livePreviewCheck != null && livePreviewCheck.isChecked());
+        }
+
         if (active) {
             status.setTextColor(MUTED);
             progress.setIndeterminate(true);
