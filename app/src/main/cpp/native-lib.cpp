@@ -1,7 +1,11 @@
 #include <jni.h>
 #include <android/log.h>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cctype>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -17,11 +21,112 @@ sd_ctx_t* g_ctx = nullptr;
 std::string g_ctx_key;
 std::once_flag g_log_once;
 
+enum ProgressPhase {
+    PHASE_IDLE = 0,
+    PHASE_LOADING = 1,
+    PHASE_CONDITIONING = 2,
+    PHASE_SAMPLING = 3,
+    PHASE_DECODING = 4,
+    PHASE_COMPLETE = 5,
+    PHASE_CANCELLED = 6,
+    PHASE_ERROR = 7
+};
+
+std::atomic<int> g_phase{PHASE_IDLE};
+std::atomic<int> g_step{0};
+std::atomic<int> g_steps{0};
+std::atomic<int64_t> g_started_ms{0};
+std::atomic<int> g_preview_version{0};
+std::atomic<int> g_preview_step{0};
+std::mutex g_preview_mutex;
+std::vector<jint> g_preview_argb;
+int g_preview_width = 0;
+int g_preview_height = 0;
+
+int64_t steady_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+int elapsed_ms() {
+    const int64_t start = g_started_ms.load();
+    if (start <= 0) return 0;
+    const int64_t elapsed = std::max<int64_t>(0, steady_ms() - start);
+    return static_cast<int>(std::min<int64_t>(elapsed, std::numeric_limits<int>::max()));
+}
+
+void set_phase(int phase, int step = 0, int steps = 0) {
+    g_step.store(std::max(0, step));
+    g_steps.store(std::max(0, steps));
+    g_phase.store(phase);
+}
+
+void reset_progress_state() {
+    g_started_ms.store(steady_ms());
+    set_phase(PHASE_LOADING);
+    {
+        std::lock_guard<std::mutex> lock(g_preview_mutex);
+        g_preview_argb.clear();
+        g_preview_width = 0;
+        g_preview_height = 0;
+    }
+    g_preview_step.store(0);
+    g_preview_version.store(0);
+}
+
+void progress_cb(int step, int steps, float, void*) {
+    const int safe_steps = std::max(0, steps);
+    const int safe_step = std::max(0, std::min(step, safe_steps > 0 ? safe_steps : step));
+    set_phase((safe_steps > 0 && safe_step >= safe_steps) ? PHASE_DECODING : PHASE_SAMPLING,
+              safe_step, safe_steps);
+}
+
+void preview_cb(int step, int frame_count, sd_image_t* frames, bool, void*) {
+    if (!frames || frame_count < 1 || !frames[0].data) return;
+    const sd_image_t& im = frames[0];
+    const int channels = static_cast<int>(im.channel);
+    if (channels < 3 || im.width == 0 || im.height == 0) return;
+
+    const size_t pixel_count = static_cast<size_t>(im.width) * static_cast<size_t>(im.height);
+    std::vector<jint> argb(pixel_count);
+    for (size_t i = 0; i < pixel_count; ++i) {
+        const uint8_t r = im.data[i * channels + 0];
+        const uint8_t g = im.data[i * channels + 1];
+        const uint8_t b = im.data[i * channels + 2];
+        const uint8_t a = channels >= 4 ? im.data[i * channels + 3] : 255;
+        argb[i] = static_cast<jint>((static_cast<uint32_t>(a) << 24) |
+                                   (static_cast<uint32_t>(r) << 16) |
+                                   (static_cast<uint32_t>(g) << 8) |
+                                   static_cast<uint32_t>(b));
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_preview_mutex);
+        g_preview_argb.swap(argb);
+        g_preview_width = static_cast<int>(im.width);
+        g_preview_height = static_cast<int>(im.height);
+    }
+    g_preview_step.store(std::max(0, step));
+    g_preview_version.fetch_add(1);
+}
+
 void android_log_cb(enum sd_log_level_t level, const char* text, void*) {
     int prio = ANDROID_LOG_INFO;
     if (level == SD_LOG_ERROR) prio = ANDROID_LOG_ERROR;
     else if (level == SD_LOG_WARN) prio = ANDROID_LOG_WARN;
     else if (level == SD_LOG_DEBUG) prio = ANDROID_LOG_DEBUG;
+
+    if (text) {
+        std::string lower(text);
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        if (lower.find("decode") != std::string::npos &&
+            (lower.find("vae") != std::string::npos || lower.find("first_stage") != std::string::npos)) {
+            const int total = g_steps.load();
+            set_phase(PHASE_DECODING, total, total);
+        }
+    }
+
     __android_log_print(prio, TAG, "%s", text ? text : "");
 }
 
@@ -180,7 +285,9 @@ Java_com_localflux_studio_MainActivity_nativeGenerate(
         jfloat textCfg,
         jfloat distilledGuidance,
         jlong seed,
-        jboolean vaeTiling) {
+        jboolean vaeTiling,
+        jboolean livePreview,
+        jint previewInterval) {
 
     std::call_once(g_log_once, [] {
         sd_set_log_callback(android_log_cb, nullptr);
@@ -211,9 +318,23 @@ Java_com_localflux_studio_MainActivity_nativeGenerate(
         return nullptr;
     }
 
-    sd_ctx_t* ctx = ensure_context(env, model, diffusion, vae, clipL, t5, llm);
-    if (!ctx || env->ExceptionCheck()) return nullptr;
+    reset_progress_state();
+    sd_set_progress_callback(progress_cb, nullptr);
+    if (livePreview == JNI_TRUE) {
+        sd_set_preview_callback(preview_cb, PREVIEW_PROJ,
+                                std::max(1, std::min(8, static_cast<int>(previewInterval))),
+                                true, false, nullptr);
+    } else {
+        sd_set_preview_callback(nullptr, PREVIEW_NONE, 1, true, false, nullptr);
+    }
 
+    sd_ctx_t* ctx = ensure_context(env, model, diffusion, vae, clipL, t5, llm);
+    if (!ctx || env->ExceptionCheck()) {
+        set_phase(PHASE_ERROR);
+        return nullptr;
+    }
+
+    set_phase(PHASE_CONDITIONING, 0, steps);
     sd_cancel_generation(ctx, SD_CANCEL_RESET);
 
     sd_img_gen_params_t gp;
@@ -242,6 +363,7 @@ Java_com_localflux_studio_MainActivity_nativeGenerate(
     sd_cancel_generation(ctx, SD_CANCEL_RESET);
 
     if (!ok || !images || count < 1 || !images[0].data) {
+        set_phase(PHASE_ERROR, g_step.load(), g_steps.load());
         if (images) free_sd_images(images, count);
         throw_runtime(env, "Generation failed. See Logcat tag LocalFluxNative for the model/runtime error.");
         return nullptr;
@@ -250,6 +372,7 @@ Java_com_localflux_studio_MainActivity_nativeGenerate(
     const sd_image_t& im = images[0];
     const int channels = static_cast<int>(im.channel);
     if (channels < 3) {
+        set_phase(PHASE_ERROR, g_step.load(), g_steps.load());
         free_sd_images(images, count);
         throw_runtime(env, "Generator returned an unsupported image format.");
         return nullptr;
@@ -273,12 +396,58 @@ Java_com_localflux_studio_MainActivity_nativeGenerate(
         env->SetIntArrayRegion(result, 0, static_cast<jsize>(pixels_count), argb.data());
     }
     free_sd_images(images, count);
+    set_phase(PHASE_COMPLETE, steps, steps);
     return result;
+}
+
+extern "C"
+JNIEXPORT jintArray JNICALL
+Java_com_localflux_studio_MainActivity_nativeProgressSnapshot(JNIEnv* env, jclass) {
+    jint values[6] = {
+            static_cast<jint>(g_phase.load()),
+            static_cast<jint>(g_step.load()),
+            static_cast<jint>(g_steps.load()),
+            static_cast<jint>(elapsed_ms()),
+            static_cast<jint>(g_preview_version.load()),
+            static_cast<jint>(g_preview_step.load())
+    };
+    jintArray out = env->NewIntArray(6);
+    if (out) env->SetIntArrayRegion(out, 0, 6, values);
+    return out;
+}
+
+extern "C"
+JNIEXPORT jintArray JNICALL
+Java_com_localflux_studio_MainActivity_nativePreviewSnapshot(
+        JNIEnv* env, jclass, jint lastVersion) {
+    std::lock_guard<std::mutex> lock(g_preview_mutex);
+    const int version = g_preview_version.load();
+    if (version <= lastVersion || g_preview_argb.empty() ||
+        g_preview_width <= 0 || g_preview_height <= 0) {
+        return nullptr;
+    }
+
+    const size_t pixel_count = g_preview_argb.size();
+    if (pixel_count > static_cast<size_t>(std::numeric_limits<jsize>::max() - 3)) {
+        return nullptr;
+    }
+    std::vector<jint> out_data(pixel_count + 3);
+    out_data[0] = version;
+    out_data[1] = g_preview_width;
+    out_data[2] = g_preview_height;
+    std::copy(g_preview_argb.begin(), g_preview_argb.end(), out_data.begin() + 3);
+
+    jintArray out = env->NewIntArray(static_cast<jsize>(out_data.size()));
+    if (out) {
+        env->SetIntArrayRegion(out, 0, static_cast<jsize>(out_data.size()), out_data.data());
+    }
+    return out;
 }
 
 extern "C"
 JNIEXPORT void JNICALL
 Java_com_localflux_studio_MainActivity_nativeCancel(JNIEnv*, jclass) {
+    set_phase(PHASE_CANCELLED, g_step.load(), g_steps.load());
     std::lock_guard<std::mutex> lock(g_ctx_mutex);
     if (g_ctx) sd_cancel_generation(g_ctx, SD_CANCEL_ALL);
 }
