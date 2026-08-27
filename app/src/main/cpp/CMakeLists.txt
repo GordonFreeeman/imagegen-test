@@ -20,6 +20,13 @@ endif()
 
 add_subdirectory("${SDCPP_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/stable-diffusion")
 
+# Android's NDK ships the C Vulkan headers but not the C++ vulkan.hpp wrapper
+# required by current ggml-vulkan. CI installs Vulkan-Headers on the host; expose
+# those header-only declarations explicitly to the cross-compiled target.
+if(ANDROID AND TARGET ggml-vulkan)
+    target_include_directories(ggml-vulkan PRIVATE /usr/include)
+endif()
+
 add_library(localflux SHARED native-lib.cpp)
 
 target_include_directories(localflux PRIVATE "${SDCPP_DIR}/include")
