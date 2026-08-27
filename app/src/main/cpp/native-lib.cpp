@@ -241,7 +241,7 @@ struct TextEncoderStrategy {
 };
 
 TextEncoderStrategy text_encoder_strategy(int mode) {
-    switch (std::max(0, std::min(11, mode))) {
+    switch (std::max(0, std::min(12, mode))) {
         case 0: return {24,  false, false, false, "1.25", true,  "cpu-min24-mobile1250"};
         case 1: return {0,   false, false, false, "1.25", true,  "cpu-real-tokens-mobile1250"};
         case 2: return {24,  true,  false, false, "1.00", true,  "cpu-ultra-early18-mobile1000"};
@@ -254,6 +254,7 @@ TextEncoderStrategy text_encoder_strategy(int mode) {
         case 9: return {512, false, true,  false, "1.25", true,  "vulkan-full512-mobile1250"};
         case 10:return {512, false, false, true,  "1.00", true,  "cpu-disk-full512-mobile1000"};
         case 11:return {32,  false, true,  false, "-1",   false, "vulkan-legacy-auto-min32"};
+        case 12:return {24,  false, true,  true,  "0.75", true,  "vulkan-safe-disk-min24-mobile750"};
         default:return {24, false, false, false, "1.25", true,  "cpu-min24-mobile1250"};
     }
 }
@@ -283,7 +284,7 @@ sd_ctx_t* ensure_context(
         int te_mode,
         int requested_threads) {
 
-    te_mode = std::max(0, std::min(11, te_mode));
+    te_mode = std::max(0, std::min(12, te_mode));
     const TextEncoderStrategy strategy = text_encoder_strategy(te_mode);
 
     int detected_threads = sd_get_num_physical_cores();
@@ -341,7 +342,9 @@ sd_ctx_t* ensure_context(
         // CPU according to the selected strategy.
         if (strategy.gpu) {
             p.backend = "diffusion=gpu,te=gpu,vae=cpu";
-            p.params_backend = "diffusion=cpu,te=cpu,vae=cpu";
+            p.params_backend = strategy.disk
+                    ? "diffusion=cpu,te=disk,vae=cpu"
+                    : "diffusion=cpu,te=cpu,vae=cpu";
         } else if (strategy.disk) {
             p.backend = "diffusion=gpu,te=cpu,vae=cpu";
             p.params_backend = "diffusion=cpu,te=disk,vae=cpu";
@@ -362,6 +365,9 @@ sd_ctx_t* ensure_context(
         // memory. Mode 11 intentionally preserves the old behavior for diagnosis.
         p.flash_attn = !strategy.gpu;
         p.diffusion_flash_attn = strategy.diffusion_flash_attn;
+        // Direct Conv2D avoids large temporary im2col buffers during FLUX.2 VAE
+        // decode. VAE tiling remains independently controlled per generation.
+        p.vae_conv_direct = true;
 
         const char* te_runtime = strategy.gpu ? "gpu-experimental" : "cpu-armv8.6";
         const char* te_params = strategy.disk ? "disk" : "cpu";
