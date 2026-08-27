@@ -689,3 +689,41 @@ APK version: 1.3.1 (versionCode 8), targetSdk 36, minSdk 29.
 ## Final status
 
 Both reviewers approved the v1.3.1 application commit `5d1c03a3ab9e05a2da0b8a614b8772f50175a87f`. This review-log update does not alter application code or APK resources.
+
+
+# v1.3.6 Resident FLUX Crash Mitigation Review
+
+Target release: v1.3.6 (versionCode 13), compile/target SDK 36, minSdk 29.
+
+## Logic Inquisitor
+
+**Verdict:** APPROVED FOR DEVICE TESTING
+
+**Why this iteration exists:**
+- A real-device screenshot from the Snapdragon 8 Elite / Adreno 830 test showed the process immediately before a native crash.
+- Process RSS was about 3.04 GB with about 3.85 GB system RAM still available, which does not look like a simple Android low-memory kill.
+- The last native line was a `flux cache backend buffer size` message from `GGMLRunner::copy_cache_tensors_to_cache_buffer()`. This is the diffusion graph-cut cache path, not the Qwen text encoder.
+- Both CPU-Qwen and Vulkan-Qwen modes eventually enter this same FLUX Vulkan path, explaining why both can crash despite very different conditioning speeds.
+
+**Changes reviewed:**
+- Keeps Qwen short-sequence conditioning and selectable CPU/Vulkan/disk strategies.
+- Adds module-specific resident diffusion mode through a local patch to the pinned stable-diffusion.cpp runtime.
+- In resident mode, Qwen retains its bounded graph budget, completes conditioning, and releases runner buffers before diffusion.
+- FLUX diffusion receives a zero graph-cut budget and disables stream-layers, so its parameters/compute buffers are staged once and retained across denoising steps.
+- Existing Vulkan allocation guards remain active: 512 MiB suballocation blocks, 1.5 GiB max Vulkan buffer and Android async Vulkan disabled.
+- Diffusion flash attention and direct VAE convolution remain enabled in bounded/resident profiles.
+- Adds three explicit resident-FLUX modes:
+  - Vulkan Qwen -> Resident FLUX (recommended)
+  - CPU Qwen -> Resident FLUX (diagnostic)
+  - Vulkan Qwen + disk staging -> Resident FLUX (lower Qwen residency)
+- v1.3.5 streamed Vulkan selections migrate automatically to the new recommended resident-FLUX profile.
+- Fixes phase reporting so lazy diffusion tensor callbacks cannot incorrectly move the UI back to "Qwen conditioning" after the engine has emitted its real generation event.
+
+**Compatibility checks:**
+- stable-diffusion.cpp remains pinned to `50d640568388f876b0d63ee6ddb6bc86d997ec64`.
+- Android Face Fusion remains pinned to `f38a70e4bacaab4132538421c471f9d4d3ccac00`.
+- Existing model imports, LoRAs, diagnostics, face swap and generic model modes are preserved.
+- Persistent signer continuity remains mandatory.
+
+**Known limitation:**
+- CI cannot reproduce Qualcomm Adreno driver behavior. The release is specifically structured to bypass the graph-cut cache path observed immediately before the real-device crash, but only physical-device execution can confirm the driver survives the resident FLUX graph.
