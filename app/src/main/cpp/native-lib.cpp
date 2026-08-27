@@ -39,6 +39,7 @@ std::atomic<int64_t> g_started_ms{0};
 std::atomic<int> g_preview_version{0};
 std::atomic<int> g_preview_step{0};
 std::atomic<int> g_expected_sample_steps{0};
+std::atomic<bool> g_sampling_started{false};
 std::mutex g_preview_mutex;
 std::vector<jint> g_preview_argb;
 int g_preview_width = 0;
@@ -73,6 +74,7 @@ void reset_progress_state() {
     }
     g_preview_step.store(0);
     g_preview_version.store(0);
+    g_sampling_started.store(false);
 }
 
 void load_progress_cb(int step, int steps, float, void*) {
@@ -86,7 +88,7 @@ void progress_cb(int step, int steps, float, void*) {
     const int safe_step = std::max(0, std::min(step, safe_steps > 0 ? safe_steps : step));
     const int expected = g_expected_sample_steps.load();
 
-    if (expected > 0 && safe_steps == expected) {
+    if (g_sampling_started.load() && expected > 0 && safe_steps == expected) {
         set_phase(PHASE_SAMPLING, safe_step, safe_steps);
     } else {
         // Runtime LoRA / lazily disk-backed model tensors can also report byte/tensor progress
@@ -134,6 +136,12 @@ void android_log_cb(enum sd_log_level_t level, const char* text, void*) {
         std::string lower(text);
         std::transform(lower.begin(), lower.end(), lower.begin(),
                        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        if (lower.find("sampling using") != std::string::npos ||
+            lower.find("sampling(high noise) using") != std::string::npos) {
+            g_sampling_started.store(true);
+            set_phase(PHASE_SAMPLING, 0, g_expected_sample_steps.load());
+        }
+
         const int phase = g_phase.load();
         if (phase >= PHASE_CONDITIONING && phase <= PHASE_SAMPLING &&
             lower.find("decoding") != std::string::npos &&
