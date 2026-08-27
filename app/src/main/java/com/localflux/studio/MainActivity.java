@@ -63,7 +63,8 @@ public class MainActivity extends Activity {
             String model, String diffusion, String vae, String clipL, String t5, String llm,
             String prompt, String negative, int width, int height, int steps,
             float textCfg, float distilledGuidance, long seed, boolean vaeTiling,
-            boolean livePreview, int previewInterval, String[] loraPaths, float[] loraStrengths);
+            boolean livePreview, int previewInterval, String[] loraPaths, float[] loraStrengths,
+            boolean extremeRamSaver);
     private static native int[] nativeProgressSnapshot();
     private static native int[] nativePreviewSnapshot(int lastVersion);
     private static native void nativeCancel();
@@ -125,6 +126,7 @@ public class MainActivity extends Activity {
     private CheckBox vaeTilingCheck;
     private CheckBox livePreviewCheck;
     private Spinner previewIntervalSpinner;
+    private CheckBox extremeRamSaverCheck;
     private Button generateButton;
     private Button cancelButton;
     private ProgressBar progress;
@@ -573,6 +575,21 @@ public class MainActivity extends Activity {
         vaeTilingCheck.setPadding(0, dp(7), 0, dp(4));
         card.addView(vaeTilingCheck);
 
+        extremeRamSaverCheck = new CheckBox(this);
+        extremeRamSaverCheck.setText("Extreme RAM saver · disk-backed text encoder");
+        extremeRamSaverCheck.setTextColor(TEXT);
+        extremeRamSaverCheck.setChecked(prefs.getBoolean("extreme_ram_saver", false));
+        extremeRamSaverCheck.setPadding(0, dp(2), 0, 0);
+        extremeRamSaverCheck.setOnCheckedChangeListener((button, checked) ->
+                prefs.edit().putBoolean("extreme_ram_saver", checked).apply());
+        card.addView(extremeRamSaverCheck);
+
+        TextView ramHint = text(
+                "Off is recommended for a 16 GB phone: Qwen stays in CPU RAM and conditioning is much faster. Turn this on only if Android kills the app for memory pressure.",
+                11, MUTED, false);
+        ramHint.setPadding(dp(2), dp(2), dp(2), dp(5));
+        card.addView(ramHint);
+
         livePreviewCheck = new CheckBox(this);
         livePreviewCheck.setText("Live denoising preview");
         livePreviewCheck.setTextColor(TEXT);
@@ -890,7 +907,8 @@ public class MainActivity extends Activity {
                         prompt, negativeInput.getText().toString(), width, height, steps,
                         textCfg, distilledGuidance, finalSeed, vaeTilingCheck.isChecked(),
                         livePreviewCheck.isChecked(), selectedPreviewInterval(),
-                        loraPathsForGeneration(), loraStrengthsForGeneration());
+                        loraPathsForGeneration(), loraStrengthsForGeneration(),
+                        extremeRamSaverCheck.isChecked());
                 if (pixels == null || pixels.length != width * height) {
                     throw new Exception("Native generator returned no image");
                 }
@@ -1129,16 +1147,18 @@ public class MainActivity extends Activity {
                 status.setText("Loading weights and preparing backends" + stall);
                 break;
             case 2:
-                if (steps > 0) {
+                if (steps > 0 && step < steps) {
                     progress.setIndeterminate(false);
                     progress.setMax(Math.max(1, steps));
                     progress.setProgress(Math.max(0, Math.min(step, steps)));
                     progressTitle.setText("Loading lazy tensors / adapters · " + step + " / " + steps + elapsedText);
-                    status.setText("Loading disk-backed text/LoRA tensors before sampling" + stall);
+                    status.setText(extremeRamSaverCheck != null && extremeRamSaverCheck.isChecked()
+                            ? "Disk-backed Qwen/LoRA tensors are being loaded on demand" + stall
+                            : "Preparing Qwen/LoRA tensors in RAM" + stall);
                 } else {
                     progress.setIndeterminate(true);
                     progressTitle.setText("Encoding prompt / preparing latents" + elapsedText);
-                    status.setText("Text encoder, LoRA application and conditioning are running" + stall);
+                    status.setText("Tensor loading is complete; Qwen text-encoder compute is running" + stall);
                 }
                 break;
             case 3:
