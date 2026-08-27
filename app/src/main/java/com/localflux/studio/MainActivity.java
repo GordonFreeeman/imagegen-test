@@ -643,8 +643,10 @@ public class MainActivity extends Activity {
     private void startGeneration() {
         String model = prefPath("model");
         String diffusion = prefPath("diffusion");
-        if (model.isEmpty() && diffusion.isEmpty()) {
-            toast("Import a full checkpoint or diffusion model first.");
+        String missing = missingProfileFiles();
+        if (!missing.isEmpty()) {
+            toast("Model setup incomplete: " + missing);
+            switchTab(1);
             return;
         }
         String prompt = promptInput.getText().toString().trim();
@@ -698,7 +700,7 @@ public class MainActivity extends Activity {
     }
 
     private void setGenerating(boolean active) {
-        generateButton.setEnabled(!active && hasGenerationModel());
+        generateButton.setEnabled(!active && missingProfileFiles().isEmpty());
         cancelButton.setVisibility(active ? View.VISIBLE : View.GONE);
         progress.setVisibility(active ? View.VISIBLE : View.GONE);
         if (!active) getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -707,7 +709,7 @@ public class MainActivity extends Activity {
     private void setBusy(boolean active, String message) {
         if (status != null) status.setText(message);
         if (progress != null) progress.setVisibility(active ? View.VISIBLE : View.GONE);
-        if (generateButton != null) generateButton.setEnabled(!active && hasGenerationModel());
+        if (generateButton != null) generateButton.setEnabled(!active && missingProfileFiles().isEmpty());
     }
 
     private void setupFaceModels() {
@@ -773,7 +775,7 @@ public class MainActivity extends Activity {
     }
 
     private void refreshGenerateEnabled() {
-        if (generateButton != null) generateButton.setEnabled(hasGenerationModel());
+        if (generateButton != null) generateButton.setEnabled(missingProfileFiles().isEmpty());
     }
 
     private boolean hasGenerationModel() {
@@ -988,6 +990,7 @@ public class MainActivity extends Activity {
             setDistilledGuidance(distilled);
         }
         refreshModelSummary();
+        refreshGenerateEnabled();
     }
 
     private String profileDescription(int p) {
@@ -1031,6 +1034,32 @@ public class MainActivity extends Activity {
         distilledValue.setText(String.format(Locale.US, "%.1f", clamped));
     }
 
+    private String missingProfileFiles() {
+        // A full checkpoint is treated as self-contained. Split stacks are validated by profile.
+        if (!prefPath("model").isEmpty()) return "";
+
+        int profile = prefs.getInt("model_profile", 1);
+        profile = Math.max(0, Math.min(MODEL_PROFILES.length - 1, profile));
+
+        java.util.ArrayList<String> missing = new java.util.ArrayList<>();
+        if (prefPath("diffusion").isEmpty()) missing.add("diffusion / transformer");
+
+        if (profile >= 1 && profile <= 5) {
+            if (prefPath("vae").isEmpty()) missing.add("FLUX.2 VAE / AE");
+            if (prefPath("llm").isEmpty()) {
+                if (profile == 5) missing.add("Mistral text encoder in LLM slot");
+                else if (profile == 3 || profile == 4) missing.add("Qwen3 8B in LLM slot");
+                else missing.add("Qwen3 4B in LLM slot");
+            }
+        } else if (profile == 6 || profile == 7) {
+            if (prefPath("vae").isEmpty()) missing.add("VAE / AE");
+            if (prefPath("clip_l").isEmpty()) missing.add("CLIP-L");
+            if (prefPath("t5").isEmpty()) missing.add("T5XXL");
+        }
+
+        return String.join(", ", missing);
+    }
+
     private void refreshModelSummary() {
         if (modelSummary == null) return;
         int profile = prefs.getInt("model_profile", 1);
@@ -1041,7 +1070,14 @@ public class MainActivity extends Activity {
         if (!root.isEmpty()) name = prefs.getString("model_name", new File(root).getName());
         else if (!diffusion.isEmpty()) name = prefs.getString("diffusion_name", new File(diffusion).getName());
         else name = "No model imported";
-        modelSummary.setText(MODEL_PROFILES[profile] + "  ·  " + name);
+        String missing = missingProfileFiles();
+        if (missing.isEmpty()) {
+            modelSummary.setText("✓  " + MODEL_PROFILES[profile] + "  ·  " + name);
+            modelSummary.setTextColor(ACCENT_2);
+        } else {
+            modelSummary.setText("⚠  " + MODEL_PROFILES[profile] + "  ·  Missing: " + missing);
+            modelSummary.setTextColor(GOLD);
+        }
     }
 
     private GradientDrawable backgroundGradient() {
