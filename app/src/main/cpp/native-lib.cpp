@@ -235,23 +235,26 @@ struct TextEncoderStrategy {
     bool early_layers;
     bool gpu;
     bool disk;
+    const char* max_vram;
+    bool diffusion_flash_attn;
     const char* label;
 };
 
 TextEncoderStrategy text_encoder_strategy(int mode) {
-    switch (std::max(0, std::min(10, mode))) {
-        case 0: return {24,  false, false, false, "cpu-min24"};
-        case 1: return {0,   false, false, false, "cpu-real-tokens"};
-        case 2: return {24,  true,  false, false, "cpu-ultra-early18"};
-        case 3: return {32,  false, false, false, "cpu-min32"};
-        case 4: return {64,  false, false, false, "cpu-min64"};
-        case 5: return {128, false, false, false, "cpu-min128"};
-        case 6: return {512, false, false, false, "cpu-full512"};
-        case 7: return {32,  false, true,  false, "vulkan-min32-experimental"};
-        case 8: return {64,  false, true,  false, "vulkan-min64-experimental"};
-        case 9: return {512, false, true,  false, "vulkan-full512-experimental"};
-        case 10:return {512, false, false, true,  "cpu-disk-full512"};
-        default:return {24,  false, false, false, "cpu-min24"};
+    switch (std::max(0, std::min(11, mode))) {
+        case 0: return {24,  false, false, false, "1.25", true,  "cpu-min24-mobile1250"};
+        case 1: return {0,   false, false, false, "1.25", true,  "cpu-real-tokens-mobile1250"};
+        case 2: return {24,  true,  false, false, "1.00", true,  "cpu-ultra-early18-mobile1000"};
+        case 3: return {32,  false, false, false, "1.25", true,  "cpu-min32-mobile1250"};
+        case 4: return {64,  false, false, false, "1.25", true,  "cpu-min64-mobile1250"};
+        case 5: return {128, false, false, false, "1.25", true,  "cpu-min128-mobile1250"};
+        case 6: return {512, false, false, false, "1.25", true,  "cpu-full512-mobile1250"};
+        case 7: return {24,  false, true,  false, "0.90", true,  "vulkan-safe-min24-mobile900"};
+        case 8: return {32,  false, true,  false, "1.25", true,  "vulkan-balanced-min32-mobile1250"};
+        case 9: return {512, false, true,  false, "1.25", true,  "vulkan-full512-mobile1250"};
+        case 10:return {512, false, false, true,  "1.00", true,  "cpu-disk-full512-mobile1000"};
+        case 11:return {32,  false, true,  false, "-1",   false, "vulkan-legacy-auto-min32"};
+        default:return {24, false, false, false, "1.25", true,  "cpu-min24-mobile1250"};
     }
 }
 
@@ -265,7 +268,7 @@ std::string make_key(
         int te_mode,
         int n_threads) {
     return model + "\n" + diffusion + "\n" + vae + "\n" + clipL + "\n" + t5 + "\n" + llm +
-           "\nmobile-safe-v6-te-mode-" + std::to_string(te_mode) +
+           "\nmobile-safe-v7-te-mode-" + std::to_string(te_mode) +
            "\nthreads-" + std::to_string(n_threads);
 }
 
@@ -280,7 +283,7 @@ sd_ctx_t* ensure_context(
         int te_mode,
         int requested_threads) {
 
-    te_mode = std::max(0, std::min(10, te_mode));
+    te_mode = std::max(0, std::min(11, te_mode));
     const TextEncoderStrategy strategy = text_encoder_strategy(te_mode);
 
     int detected_threads = sd_get_num_physical_cores();
@@ -347,14 +350,18 @@ sd_ctx_t* ensure_context(
             p.params_backend = "diffusion=cpu,te=cpu,vae=cpu";
         }
 
-        p.max_vram = "-1";
+        // Do not use auto VRAM on Android unified memory by default. Auto mode
+        // sees most system RAM as Vulkan memory and can effectively disable graph
+        // cutting, producing multi-gigabyte allocations that Adreno cannot accept.
+        p.max_vram = strategy.max_vram;
         p.stream_layers = true;
         p.auto_fit = false;
 
-        // CPU Qwen keeps flash attention. The current Adreno path is more stable
-        // with TE flash attention disabled in experimental Vulkan modes.
+        // Keep Qwen TE flash attention off on Vulkan for Adreno stability. Diffusion
+        // flash attention is enabled in bounded mobile modes to reduce working-set
+        // memory. Mode 11 intentionally preserves the old behavior for diagnosis.
         p.flash_attn = !strategy.gpu;
-        p.diffusion_flash_attn = false;
+        p.diffusion_flash_attn = strategy.diffusion_flash_attn;
 
         const char* te_runtime = strategy.gpu ? "gpu-experimental" : "cpu-armv8.6";
         const char* te_params = strategy.disk ? "disk" : "cpu";
@@ -362,11 +369,12 @@ sd_ctx_t* ensure_context(
         std::snprintf(mode_line, sizeof(mode_line),
                       "Loading split-model context "
                       "(diffusion=gpu, te=%s, vae=cpu, params diffusion=cpu te=%s, strategy=%s, "
-                      "qwen_min=%d, states=%s, threads=%d, mmap=sequential, max_vram=-1, stream_layers=1; "
-                      "TE runner buffers released after conditioning)",
+                      "qwen_min=%d, states=%s, threads=%d, mmap=sequential, max_vram=%s GiB, "
+                      "stream_layers=1, diffusion_fa=%d; TE runner buffers synchronized and released after conditioning)",
                       te_runtime, te_params, strategy.label, strategy.min_tokens,
                       strategy.early_layers ? "6/12/18" : "9/18/27",
-                      effective_threads);
+                      effective_threads, strategy.max_vram,
+                      strategy.diffusion_flash_attn ? 1 : 0);
         push_console_log(SD_LOG_INFO, mode_line);
         __android_log_print(ANDROID_LOG_INFO, TAG, "%s", mode_line);
     } else {
@@ -402,6 +410,16 @@ sd_ctx_t* ensure_context(
 }
 } // namespace
 
+extern "C" jint JNI_OnLoad(JavaVM*, void*) {
+    // Adreno/Android uses unified system memory, but Vulkan still has practical
+    // per-buffer and driver-allocation limits. Keep backend allocations bounded
+    // before sd_get_system_info()/sd_list_devices can initialize Vulkan.
+    setenv("GGML_VK_DISABLE_ASYNC", "1", 0);
+    setenv("GGML_VK_SUBALLOCATION_BLOCK_SIZE", "536870912", 0);   // 512 MiB
+    setenv("GGML_VK_FORCE_MAX_BUFFER_SIZE", "1610612736", 0);    // 1.5 GiB
+    return JNI_VERSION_1_6;
+}
+
 extern "C"
 JNIEXPORT jstring JNICALL
 Java_com_localflux_studio_MainActivity_nativeSystemInfo(JNIEnv* env, jclass) {
@@ -412,6 +430,7 @@ Java_com_localflux_studio_MainActivity_nativeSystemInfo(JNIEnv* env, jclass) {
     std::string out = sd_get_system_info() ? sd_get_system_info() : "stable-diffusion.cpp";
     out += "\nCPU target: ARMv8.6 + DOTPROD + I8MM; KleidiAI enabled for Q4_0/Q8_0";
     out += "\nKlein conditioning: real/24/32/64/128/512-token modes + optional early 6/12/18 states";
+    out += "\nAndroid Vulkan safety: async off, 512 MiB suballocations, 1.5 GiB max buffer, explicit graph budgets";
     const size_t n = sd_list_devices(nullptr, 0);
     if (n > 0) {
         std::vector<char> buf(n + 1, 0);
