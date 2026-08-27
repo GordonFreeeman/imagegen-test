@@ -241,11 +241,13 @@ public class MainActivity extends Activity {
         LinearLayout card = card();
         card.addView(sectionTitle("2 · Generate"));
 
-        card.addView(fieldLabel("Prompt"));\n        promptInput = input(4);
+        card.addView(fieldLabel("Prompt"));
+        promptInput = input(4);
         promptInput.setHint("dark fantasy knight beneath a blood-red eclipse, intricate armor, dramatic chiaroscuro…");
         card.addView(promptInput);
 
-        card.addView(fieldLabel("Negative prompt (optional)"));\n        negativeInput = input(2);
+        card.addView(fieldLabel("Negative prompt (optional)"));
+        negativeInput = input(2);
         negativeInput.setHint("low quality, artifacts, extra fingers…");
         card.addView(negativeInput);
 
@@ -283,7 +285,8 @@ public class MainActivity extends Activity {
         guidanceBar.setOnSeekBarChangeListener(simpleSeek(v -> guidanceValue.setText(String.format(Locale.US, "%.1f", 1.0f + v / 10f))));
         card.addView(guidanceBar);
 
-        card.addView(fieldLabel("Seed (-1 = random)"));\n        seedInput = input(1);
+        card.addView(fieldLabel("Seed (-1 = random)"));
+        seedInput = input(1);
         seedInput.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED);
         seedInput.setText("-1");
         card.addView(seedInput);
