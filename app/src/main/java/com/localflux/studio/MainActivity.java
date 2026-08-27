@@ -364,6 +364,16 @@ public class MainActivity extends Activity {
         faceStatus.setPadding(0, dp(7), 0, dp(10));
         card.addView(faceStatus);
 
+        LinearLayout previewLabels = new LinearLayout(this);
+        previewLabels.setOrientation(LinearLayout.HORIZONTAL);
+        TextView myFaceLabel = text("MY FACE", 11, ACCENT_2, true);
+        TextView artworkLabel = text("ARTWORK / TARGET", 11, ACCENT_2, true);
+        previewLabels.addView(myFaceLabel, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout.LayoutParams artworkLabelLp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        artworkLabelLp.setMarginStart(dp(8));
+        previewLabels.addView(artworkLabel, artworkLabelLp);
+        card.addView(previewLabels);
+
         LinearLayout previewRow = new LinearLayout(this);
         previewRow.setOrientation(LinearLayout.HORIZONTAL);
 
@@ -471,11 +481,18 @@ public class MainActivity extends Activity {
                 File finalFile = new File(dir, roleCopy + "-" + safe);
                 if (finalFile.exists()) finalFile.delete();
                 if (!dest.renameTo(finalFile)) throw new Exception("Could not finalize imported model");
-                prefs.edit()
+                SharedPreferences.Editor editor = prefs.edit()
                         .putString(roleCopy + "_path", finalFile.getAbsolutePath())
                         .putString(roleCopy + "_name", display)
-                        .putLong(roleCopy + "_bytes", finalFile.length())
-                        .apply();
+                        .putLong(roleCopy + "_bytes", finalFile.length());
+                // A full checkpoint and a split diffusion/transformer are alternative roots.
+                // Clear the other root to prevent an invalid mixed context.
+                if ("model".equals(roleCopy)) {
+                    editor.remove("diffusion_path").remove("diffusion_name").remove("diffusion_bytes");
+                } else if ("diffusion".equals(roleCopy)) {
+                    editor.remove("model_path").remove("model_name").remove("model_bytes");
+                }
+                editor.apply();
                 runOnUiThread(() -> {
                     nativeUnload();
                     refreshModelRows();
@@ -912,7 +929,8 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        super.onDestroy();
+        nativeCancel();
         worker.shutdownNow();
+        super.onDestroy();
     }
 }
