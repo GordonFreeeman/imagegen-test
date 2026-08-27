@@ -46,7 +46,9 @@ new = '''        } else if (version == VERSION_FLUX2_KLEIN) {
                 char* end = nullptr;
                 long parsed = std::strtol(value, &end, 10);
                 if (end != value) {
-                    localflux_min_tokens = static_cast<int>(std::max(0L, std::min(512L, parsed)));
+                    if (parsed < 0) parsed = 0;
+                    if (parsed > 512) parsed = 512;
+                    localflux_min_tokens = static_cast<int>(parsed);
                 }
             }
             min_length               = localflux_min_tokens;
@@ -56,9 +58,11 @@ new = '''        } else if (version == VERSION_FLUX2_KLEIN) {
                 const char* value = std::getenv("LOCALFLUX_KLEIN_EARLY_LAYERS");
                 return value != nullptr && value[0] == '1';
             }();
-            out_layers = localflux_early_layers
-                    ? std::set<int>{6, 12, 18}
-                    : std::set<int>{9, 18, 27};
+            if (localflux_early_layers) {
+                out_layers = {6, 12, 18};
+            } else {
+                out_layers = {9, 18, 27};
+            }
 
             LOG_INFO("LocalFlux Klein conditioning: Qwen min=%d, embeddings>=512, states=%s",
                      min_length,
