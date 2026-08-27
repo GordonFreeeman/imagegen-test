@@ -678,38 +678,41 @@ public class MainActivity extends Activity {
 
         card.addView(fieldLabel("Text encoder backend"));
         textEncoderModeSpinner = styledSpinner(new String[]{
-                "Turbo CPU · DOTPROD/I8MM · recommended",
-                "Vulkan Qwen · experimental · may crash",
-                "CPU + disk · minimum RAM · very slow"
+                "Sprint CPU · Qwen min 64 · recommended",
+                "Balanced CPU · Qwen min 128",
+                "Reference CPU · full 512 Qwen",
+                "Vulkan Qwen · full 512 · experimental",
+                "CPU + disk · full 512 · emergency"
         });
 
-        // v1.3.1 used mode 0 for Vulkan and mode 1 for the old generic CPU path.
-        // v1.3.2 changes the schema so both upgrade safely to the optimized CPU path.
+        // v1.3.3 adds adaptive Klein conditioning. Migrate earlier backend-only
+        // selections while keeping upgrades safe: CPU becomes Sprint, Vulkan
+        // remains Vulkan, and disk remains the emergency disk-backed path.
         int savedTeMode;
         int teSchema = prefs.getInt("text_encoder_mode_schema", 0);
-        if (teSchema < 2) {
+        if (teSchema < 3) {
             int oldMode;
             if (prefs.contains("text_encoder_mode")) {
                 oldMode = Math.max(0, Math.min(2, prefs.getInt("text_encoder_mode", 0)));
             } else {
                 oldMode = prefs.getBoolean("extreme_ram_saver", false) ? 2 : 0;
             }
-            savedTeMode = oldMode == 2 ? 2 : 0;
+            savedTeMode = oldMode == 1 ? 3 : (oldMode == 2 ? 4 : 0);
             prefs.edit()
                     .putInt("text_encoder_mode", savedTeMode)
-                    .putInt("text_encoder_mode_schema", 2)
+                    .putInt("text_encoder_mode_schema", 3)
                     .remove("extreme_ram_saver")
                     .apply();
         } else {
-            savedTeMode = Math.max(0, Math.min(2, prefs.getInt("text_encoder_mode", 0)));
+            savedTeMode = Math.max(0, Math.min(4, prefs.getInt("text_encoder_mode", 0)));
         }
 
         textEncoderModeSpinner.setSelection(savedTeMode);
         textEncoderModeSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
                 prefs.edit()
-                        .putInt("text_encoder_mode", Math.max(0, Math.min(2, position)))
-                        .putInt("text_encoder_mode_schema", 2)
+                        .putInt("text_encoder_mode", Math.max(0, Math.min(4, position)))
+                        .putInt("text_encoder_mode_schema", 3)
                         .apply();
             }
             @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
@@ -718,7 +721,7 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(52)));
 
         TextView ramHint = text(
-                "Turbo CPU is built specifically for modern Snapdragon arm64: Q4_K_M uses GGML DOTPROD/I8MM kernels, CPU flash attention is enabled, and Qwen runner buffers are released after prompt conditioning before FLUX sampling. Vulkan Qwen stays available only as an experimental option because it can crash some Adreno drivers.",
+                "Sprint and Balanced avoid the pinned runtime's expensive FLUX.2 Klein behavior of running Qwen over 512 padded input tokens for every prompt. They run Qwen on a 64- or 128-token minimum, then zero-pad the produced embeddings to 512 before FLUX sampling. Reference CPU keeps upstream full-512 behavior for comparison. Q4_0 can use KleidiAI directly; Q4_K_M still uses the ARMv8.6 DOTPROD/I8MM GGML kernels. Vulkan stays experimental because it can crash current Adreno drivers.",
                 11, MUTED, false);
         ramHint.setPadding(dp(2), dp(4), dp(2), dp(5));
         card.addView(ramHint);
@@ -769,7 +772,7 @@ public class MainActivity extends Activity {
         progress.setVisibility(View.GONE);
         card.addView(progress, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(10)));
 
-        status = text("Ready. FLUX.2 Klein 4B Q4 at 512² is the safest first run on a 16 GB phone.", 12, MUTED, false);
+        status = text("Ready. FLUX.2 Klein 4B at 512² with Sprint CPU is the recommended first run on a 16 GB phone.", 12, MUTED, false);
         status.setGravity(Gravity.CENTER_HORIZONTAL);
         status.setPadding(dp(5), dp(9), dp(5), dp(10));
         card.addView(status);
@@ -1146,7 +1149,9 @@ public class MainActivity extends Activity {
                 android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DISPLAY);
                 appendConsole("APP", "Inference thread promoted for foreground compute · "
                         + textEncoderModeLabel(textEncoderMode)
-                        + (textEncoderMode == 0 ? " · ARMv8.6 DOTPROD/I8MM + CPU flash attention" : ""));
+                        + (textEncoderMode <= 2
+                            ? " · ARMv8.6 DOTPROD/I8MM + CPU flash attention + mmap sequential"
+                            : ""));
 
                 int[] pixels = nativeGenerate(
                         model, diffusion, vae, clipL, t5, llm,
@@ -1688,15 +1693,17 @@ public class MainActivity extends Activity {
 
     private int selectedTextEncoderMode() {
         if (textEncoderModeSpinner == null) {
-            return Math.max(0, Math.min(2, prefs.getInt("text_encoder_mode", 0)));
+            return Math.max(0, Math.min(4, prefs.getInt("text_encoder_mode", 0)));
         }
-        return Math.max(0, Math.min(2, textEncoderModeSpinner.getSelectedItemPosition()));
+        return Math.max(0, Math.min(4, textEncoderModeSpinner.getSelectedItemPosition()));
     }
 
     private String textEncoderModeLabel(int mode) {
-        if (mode == 2) return "CPU+disk";
-        if (mode == 1) return "Vulkan EXP";
-        return "Turbo CPU";
+        if (mode == 4) return "CPU+disk 512";
+        if (mode == 3) return "Vulkan EXP 512";
+        if (mode == 2) return "CPU reference 512";
+        if (mode == 1) return "CPU balanced 128";
+        return "CPU sprint 64";
     }
 
     private int[] selectedDimensions() {
