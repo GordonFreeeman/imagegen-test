@@ -28,6 +28,9 @@ android {
                 arguments += listOf(
                     "-DANDROID_STL=c++_shared",
                     "-DGGML_OPENMP=OFF",
+                    "-DGGML_CPU_ARM_ARCH=armv8.6-a+dotprod+i8mm",
+                    "-DGGML_CPU_KLEIDIAI=ON",
+                    "-DGGML_CPU_REPACK=ON",
                     "-DSD_VULKAN=ON",
                     "-DSD_BUILD_EXAMPLES=OFF",
                     "-DSD_WEBP=OFF",
