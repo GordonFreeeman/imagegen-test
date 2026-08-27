@@ -76,7 +76,7 @@ public class MainActivity extends Activity {
             String prompt, String negative, int width, int height, int steps,
             float textCfg, float distilledGuidance, long seed, boolean vaeTiling,
             boolean livePreview, int previewInterval, String[] loraPaths, float[] loraStrengths,
-            boolean extremeRamSaver);
+            int textEncoderMode);
     private static native String nativeDrainLogs();
     private static native int[] nativeProgressSnapshot();
     private static native int[] nativePreviewSnapshot(int lastVersion);
@@ -141,7 +141,7 @@ public class MainActivity extends Activity {
     private CheckBox vaeTilingCheck;
     private CheckBox livePreviewCheck;
     private Spinner previewIntervalSpinner;
-    private CheckBox extremeRamSaverCheck;
+    private Spinner textEncoderModeSpinner;
     private Button generateButton;
     private Button cancelButton;
     private ProgressBar progress;
@@ -676,19 +676,35 @@ public class MainActivity extends Activity {
         vaeTilingCheck.setPadding(0, dp(7), 0, dp(4));
         card.addView(vaeTilingCheck);
 
-        extremeRamSaverCheck = new CheckBox(this);
-        extremeRamSaverCheck.setText("Extreme RAM saver · disk-backed text encoder");
-        extremeRamSaverCheck.setTextColor(TEXT);
-        extremeRamSaverCheck.setChecked(prefs.getBoolean("extreme_ram_saver", false));
-        extremeRamSaverCheck.setPadding(0, dp(2), 0, 0);
-        extremeRamSaverCheck.setOnCheckedChangeListener((button, checked) ->
-                prefs.edit().putBoolean("extreme_ram_saver", checked).apply());
-        card.addView(extremeRamSaverCheck);
+        card.addView(fieldLabel("Text encoder backend"));
+        textEncoderModeSpinner = styledSpinner(new String[]{
+                "Vulkan GPU · fastest · recommended",
+                "CPU RAM · compatibility",
+                "CPU + disk · minimum RAM · very slow"
+        });
+        int savedTeMode;
+        if (prefs.contains("text_encoder_mode")) {
+            savedTeMode = Math.max(0, Math.min(2, prefs.getInt("text_encoder_mode", 0)));
+        } else {
+            // Migrate the old checkbox: checked meant disk-backed CPU, unchecked becomes the new
+            // high-performance Vulkan default on capable Snapdragon devices.
+            savedTeMode = prefs.getBoolean("extreme_ram_saver", false) ? 2 : 0;
+            prefs.edit().putInt("text_encoder_mode", savedTeMode).apply();
+        }
+        textEncoderModeSpinner.setSelection(savedTeMode);
+        textEncoderModeSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
+                prefs.edit().putInt("text_encoder_mode", Math.max(0, Math.min(2, position))).apply();
+            }
+            @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
+        });
+        card.addView(textEncoderModeSpinner, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(52)));
 
         TextView ramHint = text(
-                "Off is recommended for a 16 GB phone: Qwen stays in CPU RAM and conditioning is much faster. Turn this on only if Android kills the app for memory pressure.",
+                "Vulkan is recommended for FLUX.2 on your Snapdragon: Qwen executes on Adreno while its weights stay CPU-backed and are staged under the GPU memory budget. CPU RAM is the fallback for Vulkan incompatibilities; CPU + disk is only for severe memory pressure.",
                 11, MUTED, false);
-        ramHint.setPadding(dp(2), dp(2), dp(2), dp(5));
+        ramHint.setPadding(dp(2), dp(4), dp(2), dp(5));
         card.addView(ramHint);
 
         livePreviewCheck = new CheckBox(this);
@@ -1077,12 +1093,13 @@ public class MainActivity extends Activity {
                 + " · CFG=" + String.format(Locale.US, "%.1f", textCfg)
                 + " · distilled=" + String.format(Locale.US, "%.1f", distilledGuidance)
                 + " · preview=" + livePreviewCheck.isChecked()
-                + " · extremeRAM=" + extremeRamSaverCheck.isChecked());
+                + " · textEncoder=" + textEncoderModeLabel(selectedTextEncoderMode()));
         prefs.edit().putBoolean("generation_in_progress", true).commit();
         setGenerating(true);
         status.setText(diffusion.isEmpty()
                 ? "Loading/caching model stack and generating locally. First run is the slowest…"
-                : "Mobile-safe mode: loading text/VAE on CPU and streaming diffusion weights to Vulkan…");
+                : "Mobile-safe mode: " + textEncoderModeLabel(selectedTextEncoderMode())
+                    + " text encoding; diffusion streams to Vulkan…");
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         final long finalSeed = seed;
@@ -1092,11 +1109,11 @@ public class MainActivity extends Activity {
         final int previewInterval = selectedPreviewInterval();
         final String[] loraPaths = loraPathsForGeneration();
         final float[] loraStrengths = loraStrengthsForGeneration();
-        final boolean useExtremeRamSaver = extremeRamSaverCheck.isChecked();
+        final int textEncoderMode = selectedTextEncoderMode();
         int activeLoras = 0;
         for (String path : loraPaths) if (path != null && !path.isEmpty()) activeLoras++;
         generationConfigSummary = MODEL_PROFILES[profile] + " · " + width + "×" + height
-                + " · " + steps + " steps · Qwen " + (useExtremeRamSaver ? "disk" : "RAM")
+                + " · " + steps + " steps · Qwen " + textEncoderModeLabel(textEncoderMode)
                 + " · preview " + (useLivePreview ? "ON" : "OFF")
                 + (activeLoras > 0 ? " · LoRA×" + activeLoras : "");
 
@@ -1108,7 +1125,7 @@ public class MainActivity extends Activity {
                         textCfg, distilledGuidance, finalSeed, useVaeTiling,
                         useLivePreview, previewInterval,
                         loraPaths, loraStrengths,
-                        useExtremeRamSaver);
+                        textEncoderMode);
                 if (pixels == null || pixels.length != width * height) {
                     throw new Exception("Native generator returned no image");
                 }
@@ -1636,6 +1653,19 @@ public class MainActivity extends Activity {
         }
     }
 
+    private int selectedTextEncoderMode() {
+        if (textEncoderModeSpinner == null) {
+            return Math.max(0, Math.min(2, prefs.getInt("text_encoder_mode", 0)));
+        }
+        return Math.max(0, Math.min(2, textEncoderModeSpinner.getSelectedItemPosition()));
+    }
+
+    private String textEncoderModeLabel(int mode) {
+        if (mode == 2) return "CPU+disk";
+        if (mode == 1) return "CPU RAM";
+        return "Vulkan GPU";
+    }
+
     private int[] selectedDimensions() {
         int position = sizeSpinner == null ? 0 : sizeSpinner.getSelectedItemPosition();
         int[][] presets = {
@@ -1727,9 +1757,12 @@ public class MainActivity extends Activity {
                     progress.setMax(Math.max(1, steps));
                     progress.setProgress(Math.max(0, Math.min(step, steps)));
                     progressTitle.setText("Loading lazy tensors / adapters · " + step + " / " + steps + elapsedText);
-                    status.setText(extremeRamSaverCheck != null && extremeRamSaverCheck.isChecked()
+                    int teMode = selectedTextEncoderMode();
+                    status.setText(teMode == 2
                             ? "Disk-backed Qwen/LoRA tensors are being loaded on demand" + stall
-                            : "Preparing Qwen/LoRA tensors in RAM" + stall);
+                            : teMode == 0
+                                ? "Preparing CPU-backed Qwen tensors for Vulkan execution" + stall
+                                : "Preparing Qwen/LoRA tensors for CPU execution" + stall);
                 } else {
                     progress.setIndeterminate(true);
                     progressTitle.setText("Encoding prompt / preparing latents" + elapsedText);
@@ -1800,7 +1833,7 @@ public class MainActivity extends Activity {
         progressTitle.setVisibility(active ? View.VISIBLE : View.GONE);
 
         if (vaeTilingCheck != null) vaeTilingCheck.setEnabled(!active);
-        if (extremeRamSaverCheck != null) extremeRamSaverCheck.setEnabled(!active);
+        if (textEncoderModeSpinner != null) textEncoderModeSpinner.setEnabled(!active);
         if (livePreviewCheck != null) livePreviewCheck.setEnabled(!active);
         if (previewIntervalSpinner != null) {
             previewIntervalSpinner.setEnabled(!active && livePreviewCheck != null && livePreviewCheck.isChecked());
@@ -2123,7 +2156,7 @@ public class MainActivity extends Activity {
     private String profileDescription(int p) {
         switch (p) {
             case 1:
-                return "BEST PHONE FIT · FLUX.2 Klein 4B\nNeeds only Diffusion / transformer + FLUX.2 VAE/AE + Qwen3 4B LLM. CLIP-L, T5XXL and Full checkpoint are hidden because this profile does not use them. Optional compatible LoRAs can be layered below.";
+                return "BEST PHONE FIT · FLUX.2 Klein 4B\nNeeds only Diffusion / transformer + FLUX.2 VAE/AE + Qwen3 4B LLM. CLIP-L, T5XXL and Full checkpoint are hidden because this profile does not use them. Vulkan GPU text encoding is recommended on Snapdragon; CPU modes remain available as fallbacks.";
             case 2:
                 return "QUALITY PHONE PROFILE · FLUX.2 Klein Base 4B\nSame files as Klein 4B, but the base model is intended for a fuller ~20-step sampling run and higher CFG.";
             case 3:
