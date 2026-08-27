@@ -201,6 +201,7 @@ public class MainActivity extends Activity {
 
         setContentView(buildUi());
         repairFlux2SlotAssignment(currentProfile());
+        updateModelSlotVisibility(currentProfile());
         refreshModelRows();
         refreshLoraRows();
         refreshGenerateEnabled();
