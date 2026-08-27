@@ -1939,11 +1939,7 @@ public class MainActivity extends Activity {
                     progress.setProgress(Math.max(0, Math.min(step, steps)));
                     progressTitle.setText("Loading lazy tensors / adapters · " + step + " / " + steps + elapsedText);
                     int teMode = selectedTextEncoderMode();
-                    status.setText(teMode == 2
-                            ? "Disk-backed Qwen/LoRA tensors are being loaded on demand" + stall
-                            : teMode == 1
-                                ? "Preparing CPU-backed Qwen tensors for experimental Vulkan execution" + stall
-                                : "Preparing Qwen/LoRA tensors for optimized ARM CPU execution" + stall);
+                    status.setText("Preparing Qwen / lazy tensors · " + textEncoderModeLabel(teMode) + stall);
                 } else {
                     progress.setIndeterminate(true);
                     progressTitle.setText("Encoding prompt / preparing latents" + elapsedText);
