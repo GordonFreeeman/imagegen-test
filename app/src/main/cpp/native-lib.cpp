@@ -50,7 +50,8 @@ std::string make_key(
         const std::string& clipL,
         const std::string& t5,
         const std::string& llm) {
-    return model + "\n" + diffusion + "\n" + vae + "\n" + clipL + "\n" + t5 + "\n" + llm;
+    return model + "\n" + diffusion + "\n" + vae + "\n" + clipL + "\n" + t5 + "\n" + llm +
+           "\nmobile-safe-v2";
 }
 
 sd_ctx_t* ensure_context(
@@ -90,14 +91,45 @@ sd_ctx_t* ensure_context(
     p.llm_path = c_or_null(llm);
     p.n_threads = std::max(2, std::min(8, sd_get_num_physical_cores()));
     p.enable_mmap = true;
-    p.flash_attn = true;
-    p.diffusion_flash_attn = true;
-    p.auto_fit = true;
+    p.eager_load = false;
 
-    __android_log_print(ANDROID_LOG_INFO, TAG, "Loading inference context (mmap + flash attention + auto-fit)");
+    const bool split_model = !diffusion.empty();
+    if (split_model) {
+        // Mobile-safe policy for FLUX-class split stacks:
+        // - run the heavy diffusion graph on the first available GPU (Vulkan on Adreno)
+        // - run text encoding + VAE on CPU
+        // - keep diffusion parameters in CPU RAM and stream transformer layers to GPU
+        // - keep the large LLM/text encoder disk-backed to reduce Android process RSS
+        // - reserve ~1 GiB GPU headroom via graph-cut segmentation
+        p.backend = "diffusion=gpu,te=cpu,vae=cpu";
+        p.params_backend = "diffusion=cpu,te=disk,vae=cpu";
+        p.max_vram = "-1";
+        p.stream_layers = true;
+        p.auto_fit = false;
+
+        // Vulkan flash-attention support varies by driver/model. Streaming+segmentation is the
+        // primary memory strategy here; disable FA for stability on mobile Vulkan.
+        p.flash_attn = false;
+        p.diffusion_flash_attn = false;
+
+        __android_log_print(
+                ANDROID_LOG_INFO, TAG,
+                "Loading split-model context in mobile-safe mode "
+                "(diffusion=gpu, te/vae=cpu, params diffusion=cpu te=disk, max_vram=-1, stream_layers=1)");
+    } else {
+        // Preserve automatic placement for genuinely self-contained checkpoints.
+        p.auto_fit = true;
+        p.flash_attn = true;
+        p.diffusion_flash_attn = true;
+        __android_log_print(ANDROID_LOG_INFO, TAG,
+                            "Loading full-checkpoint context (mmap + flash attention + auto-fit)");
+    }
     g_ctx = new_sd_ctx(&p);
     if (!g_ctx) {
-        throw_runtime(env, "Model loading failed. Check that the selected files belong to the same supported FLUX/checkpoint family and leave sufficient free RAM.");
+        throw_runtime(env, split_model
+                ? "Model loading failed in mobile-safe mode. Verify diffusion, VAE and text-encoder compatibility. "
+                  "If Android still terminates the app, retry at 512x512 after closing other memory-heavy apps."
+                : "Model loading failed. Check that the selected checkpoint is supported and leave sufficient free RAM.");
         return nullptr;
     }
     if (!sd_ctx_supports_image_generation(g_ctx)) {
