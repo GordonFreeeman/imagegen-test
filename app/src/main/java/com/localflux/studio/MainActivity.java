@@ -1,9 +1,13 @@
 package com.localflux.studio;
 
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.app.AlertDialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.ContentValues;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.graphics.Bitmap;
@@ -12,7 +16,10 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.os.BatteryManager;
 import android.os.Bundle;
+import android.os.Debug;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
@@ -20,6 +27,7 @@ import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.text.InputType;
+import android.text.method.ScrollingMovementMethod;
 import android.view.Gravity;
 import android.view.View;
 import android.view.Window;
@@ -43,10 +51,14 @@ import com.pv.androidfacefusion.FaceEmbedder;
 import com.pv.androidfacefusion.FaceFusionProcessor;
 import com.pv.androidfacefusion.FaceSwapper;
 
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.FileReader;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -65,6 +77,7 @@ public class MainActivity extends Activity {
             float textCfg, float distilledGuidance, long seed, boolean vaeTiling,
             boolean livePreview, int previewInterval, String[] loraPaths, float[] loraStrengths,
             boolean extremeRamSaver);
+    private static native String nativeDrainLogs();
     private static native int[] nativeProgressSnapshot();
     private static native int[] nativePreviewSnapshot(int lastVersion);
     private static native void nativeCancel();
@@ -100,7 +113,9 @@ public class MainActivity extends Activity {
     };
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private final ExecutorService diagnosticsWorker = Executors.newSingleThreadExecutor();
     private SharedPreferences prefs;
+    private String runtimeInfo = "";
 
     private final LinkedHashMap<String, String> roleLabels = new LinkedHashMap<>();
     private final Map<String, TextView> roleValues = new LinkedHashMap<>();
@@ -140,9 +155,15 @@ public class MainActivity extends Activity {
     private LinearLayout generationCard;
     private LinearLayout modelCard;
     private LinearLayout faceCard;
+    private LinearLayout consoleCard;
     private Button createTab;
     private Button modelsTab;
     private Button faceTab;
+    private Button consoleTab;
+    private TextView generationTelemetry;
+    private TextView consoleTelemetry;
+    private TextView consoleText;
+    private CheckBox consoleAutoScroll;
 
     private Bitmap currentBitmap;
     private Bitmap sourceBitmap;
@@ -167,6 +188,28 @@ public class MainActivity extends Activity {
     private int lastProgressStep = -1;
     private long lastProgressChangeMs = 0L;
 
+    private static final int MAX_CONSOLE_CHARS = 140_000;
+    private final StringBuilder consoleBuffer = new StringBuilder();
+    private volatile boolean diagnosticsStopped = false;
+    private volatile boolean diagnosticsBusy = false;
+    private volatile long lastNativeEventUptimeMs = 0L;
+    private long lastTelemetryConsoleMs = 0L;
+    private long prevProcessCpuMs = -1L;
+    private long prevProcessWallMs = -1L;
+    private long prevSystemCpuTotal = -1L;
+    private long prevSystemCpuIdle = -1L;
+    private long prevGpuBusy = -1L;
+    private long prevGpuTotal = -1L;
+
+    private static final class TelemetrySnapshot {
+        final String display;
+        final String compact;
+        TelemetrySnapshot(String display, String compact) {
+            this.display = display;
+            this.compact = compact;
+        }
+    }
+
     private final Runnable progressPoller = new Runnable() {
         @Override public void run() {
             if (!generationActive) return;
@@ -184,6 +227,44 @@ public class MainActivity extends Activity {
         }
     };
 
+    private final Runnable diagnosticsPoller = new Runnable() {
+        @Override public void run() {
+            if (diagnosticsStopped) return;
+            if (diagnosticsBusy) {
+                uiHandler.postDelayed(this, 1000);
+                return;
+            }
+            diagnosticsBusy = true;
+            diagnosticsWorker.execute(() -> {
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
+                String nativeLogs = "";
+                TelemetrySnapshot telemetry;
+                try {
+                    nativeLogs = nativeDrainLogs();
+                } catch (Throwable ignored) {}
+                if (nativeLogs != null && !nativeLogs.trim().isEmpty()) {
+                    lastNativeEventUptimeMs = SystemClock.elapsedRealtime();
+                }
+                telemetry = collectTelemetry();
+                final String logs = nativeLogs;
+                final TelemetrySnapshot snapshot = telemetry;
+                runOnUiThread(() -> {
+                    diagnosticsBusy = false;
+                    if (diagnosticsStopped) return;
+                    if (logs != null && !logs.isEmpty()) appendConsoleRaw(logs);
+                    if (generationTelemetry != null) generationTelemetry.setText(snapshot.display);
+                    if (consoleTelemetry != null) consoleTelemetry.setText(snapshot.display);
+                    long now = SystemClock.elapsedRealtime();
+                    if (generationActive && now - lastTelemetryConsoleMs >= 15_000L) {
+                        lastTelemetryConsoleMs = now;
+                        appendConsole("METRIC", snapshot.compact);
+                    }
+                    uiHandler.postDelayed(diagnosticsPoller, 1000);
+                });
+            });
+        }
+    };
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -195,6 +276,7 @@ public class MainActivity extends Activity {
         roleLabels.put("clip_l", "CLIP-L");
         roleLabels.put("t5", "T5XXL");
         roleLabels.put("llm", "LLM / Qwen encoder");
+        runtimeInfo = nativeSystemInfo();
 
         Window w = getWindow();
         w.setStatusBarColor(BG);
@@ -217,7 +299,12 @@ public class MainActivity extends Activity {
                         + "Mobile-safe memory mode is enabled; retry starts at 512 × 512.");
                 status.setTextColor(GOLD);
             }
+            appendConsole("APP", "Previous generation ended with an unexpected process termination.");
         }
+        appendConsole("APP", "Local Flux Studio started. Diagnostics console active.");
+        appendConsole("RUNTIME", runtimeInfo.replace("\n", " | "));
+        diagnosticsStopped = false;
+        uiHandler.post(diagnosticsPoller);
     }
 
     private View buildUi() {
@@ -273,12 +360,15 @@ public class MainActivity extends Activity {
         createTab = tabButton("Create");
         modelsTab = tabButton("Models");
         faceTab = tabButton("Face swap");
+        consoleTab = tabButton("Console");
         createTab.setOnClickListener(v -> switchTab(0));
         modelsTab.setOnClickListener(v -> switchTab(1));
         faceTab.setOnClickListener(v -> switchTab(2));
-        nav.addView(createTab, new LinearLayout.LayoutParams(dp(112), dp(46)));
-        nav.addView(modelsTab, new LinearLayout.LayoutParams(dp(112), dp(46)));
-        nav.addView(faceTab, new LinearLayout.LayoutParams(dp(118), dp(46)));
+        consoleTab.setOnClickListener(v -> switchTab(3));
+        nav.addView(createTab, new LinearLayout.LayoutParams(dp(100), dp(46)));
+        nav.addView(modelsTab, new LinearLayout.LayoutParams(dp(100), dp(46)));
+        nav.addView(faceTab, new LinearLayout.LayoutParams(dp(112), dp(46)));
+        nav.addView(consoleTab, new LinearLayout.LayoutParams(dp(104), dp(46)));
         navScroll.addView(nav);
         root.addView(navScroll, matchWrap());
 
@@ -288,10 +378,12 @@ public class MainActivity extends Activity {
         generationCard = (LinearLayout) buildGenerationCard();
         modelCard = (LinearLayout) buildModelCard();
         faceCard = (LinearLayout) buildFaceCard();
+        consoleCard = (LinearLayout) buildConsoleCard();
 
         root.addView(generationCard);
         root.addView(modelCard);
         root.addView(faceCard);
+        root.addView(consoleCard);
 
         TextView footer = text(
                 "Your prompts, source photos, face embeddings and generated images stay on this device. Network access is only used when you explicitly install optional face models.",
@@ -455,7 +547,7 @@ public class MainActivity extends Activity {
         runtimeTitle.setPadding(0, dp(18), 0, dp(5));
         card.addView(runtimeTitle);
 
-        TextView runtime = text(nativeSystemInfo(), 10, MUTED, false);
+        TextView runtime = text(runtimeInfo, 10, MUTED, false);
         runtime.setTypeface(Typeface.MONOSPACE);
         runtime.setPadding(dp(12), dp(10), dp(12), dp(10));
         runtime.setBackground(roundRect(Color.rgb(13, 13, 21), 13, Color.rgb(49, 46, 65)));
@@ -616,6 +708,7 @@ public class MainActivity extends Activity {
         cancelButton = dangerButton("Cancel generation");
         cancelButton.setVisibility(View.GONE);
         cancelButton.setOnClickListener(v -> {
+            appendConsole("APP", "Cancellation requested by user.");
             nativeCancel();
             status.setText("Cancellation requested…");
         });
@@ -637,8 +730,19 @@ public class MainActivity extends Activity {
 
         status = text("Ready. FLUX.2 Klein 4B Q4 at 512² is the safest first run on a 16 GB phone.", 12, MUTED, false);
         status.setGravity(Gravity.CENTER_HORIZONTAL);
-        status.setPadding(dp(5), dp(9), dp(5), dp(12));
+        status.setPadding(dp(5), dp(9), dp(5), dp(10));
         card.addView(status);
+
+        TextView telemetryTitle = text("LIVE DEVICE TELEMETRY", 10, GOLD, true);
+        telemetryTitle.setLetterSpacing(0.08f);
+        telemetryTitle.setPadding(0, dp(3), 0, dp(5));
+        card.addView(telemetryTitle);
+
+        generationTelemetry = text("Initializing telemetry…", 10, MUTED, false);
+        generationTelemetry.setTypeface(Typeface.MONOSPACE);
+        generationTelemetry.setPadding(dp(11), dp(9), dp(11), dp(9));
+        generationTelemetry.setBackground(roundRect(Color.rgb(13, 13, 21), 13, Color.rgb(49, 46, 65)));
+        card.addView(generationTelemetry, matchWrap());
 
         resultImage = new ImageView(this);
         resultImage.setAdjustViewBounds(true);
@@ -653,6 +757,73 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams saveLp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(50));
         saveLp.topMargin = dp(10);
         card.addView(saveButton, saveLp);
+
+        return card;
+    }
+
+    private View buildConsoleCard() {
+        LinearLayout card = card();
+        card.addView(sectionTitle("Console & diagnostics"));
+        card.addView(text(
+                "Raw stable-diffusion.cpp messages plus app lifecycle and phase events. Device telemetry is sampled on a low-priority thread and GPU counters are best-effort because Android/OEM permissions vary.",
+                12, MUTED, false));
+
+        TextView telemetryLabel = text("LIVE TELEMETRY", 10, ACCENT_2, true);
+        telemetryLabel.setLetterSpacing(0.08f);
+        telemetryLabel.setPadding(0, dp(14), 0, dp(5));
+        card.addView(telemetryLabel);
+
+        consoleTelemetry = text("Initializing telemetry…", 10, MUTED, false);
+        consoleTelemetry.setTypeface(Typeface.MONOSPACE);
+        consoleTelemetry.setPadding(dp(11), dp(10), dp(11), dp(10));
+        consoleTelemetry.setBackground(roundRect(Color.rgb(13, 13, 21), 13, Color.rgb(49, 46, 65)));
+        card.addView(consoleTelemetry, matchWrap());
+
+        consoleAutoScroll = new CheckBox(this);
+        consoleAutoScroll.setText("Auto-scroll console");
+        consoleAutoScroll.setTextColor(TEXT);
+        consoleAutoScroll.setChecked(true);
+        consoleAutoScroll.setPadding(0, dp(10), 0, dp(4));
+        card.addView(consoleAutoScroll);
+
+        consoleText = text("", 10, Color.rgb(204, 208, 222), false);
+        consoleText.setTypeface(Typeface.MONOSPACE);
+        consoleText.setTextIsSelectable(true);
+        consoleText.setMovementMethod(new ScrollingMovementMethod());
+        consoleText.setGravity(Gravity.TOP | Gravity.START);
+        consoleText.setPadding(dp(11), dp(10), dp(11), dp(10));
+        consoleText.setMinHeight(dp(390));
+        consoleText.setMaxHeight(dp(560));
+        consoleText.setBackground(roundRect(Color.rgb(8, 9, 14), 14, Color.rgb(46, 49, 65)));
+        card.addView(consoleText, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(460)));
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        actions.setPadding(0, dp(9), 0, 0);
+
+        Button copy = secondaryButton("Copy");
+        copy.setOnClickListener(v -> copyConsole());
+        actions.addView(copy, new LinearLayout.LayoutParams(0, dp(46), 1f));
+
+        Button save = secondaryButton("Save log");
+        save.setOnClickListener(v -> saveConsoleLog());
+        LinearLayout.LayoutParams saveLp = new LinearLayout.LayoutParams(0, dp(46), 1f);
+        saveLp.setMarginStart(dp(7));
+        actions.addView(save, saveLp);
+
+        Button clear = secondaryButton("Clear");
+        clear.setOnClickListener(v -> clearConsole());
+        LinearLayout.LayoutParams clearLp = new LinearLayout.LayoutParams(0, dp(46), 1f);
+        clearLp.setMarginStart(dp(7));
+        actions.addView(clear, clearLp);
+        card.addView(actions);
+
+        TextView hint = text(
+                "Tip: if generation appears stuck, copy or save this console. The last native message plus CPU/RAM/GPU telemetry usually reveals whether it is computing, paging, waiting on storage, or blocked before Vulkan sampling.",
+                11, MUTED, false);
+        hint.setPadding(dp(2), dp(9), dp(2), 0);
+        card.addView(hint);
 
         return card;
     }
@@ -892,6 +1063,12 @@ public class MainActivity extends Activity {
         }
 
         warnThermalIfNeeded();
+        appendConsole("APP", "Generation requested · profile=" + MODEL_PROFILES[profile]
+                + " · " + width + "×" + height + " · steps=" + steps
+                + " · CFG=" + String.format(Locale.US, "%.1f", textCfg)
+                + " · distilled=" + String.format(Locale.US, "%.1f", distilledGuidance)
+                + " · preview=" + livePreviewCheck.isChecked()
+                + " · extremeRAM=" + extremeRamSaverCheck.isChecked());
         prefs.edit().putBoolean("generation_in_progress", true).commit();
         setGenerating(true);
         status.setText(diffusion.isEmpty()
@@ -927,6 +1104,7 @@ public class MainActivity extends Activity {
                     resultImage.setImageBitmap(b);
                     saveButton.setEnabled(true);
                     status.setText("Done · " + width + " × " + height + ". Model stays cached in RAM for the next generation.");
+                    appendConsole("APP", "Generation completed · " + width + "×" + height);
                     setGenerating(false);
                 });
             } catch (Throwable e) {
@@ -934,6 +1112,7 @@ public class MainActivity extends Activity {
                     prefs.edit().putBoolean("generation_in_progress", false).apply();
                     status.setTextColor(DANGER);
                     status.setText("Generation failed: " + safeMessage(e));
+                    appendConsole("ERROR", "Generation failed: " + safeMessage(e));
                     setGenerating(false);
                 });
             }
@@ -1077,6 +1256,339 @@ public class MainActivity extends Activity {
         if (row != null) row.setVisibility(visible ? View.VISIBLE : View.GONE);
     }
 
+    private String phaseName(int phase) {
+        switch (phase) {
+            case 1: return "Loading model tensors";
+            case 2: return "Conditioning / lazy tensors";
+            case 3: return "Sampling";
+            case 4: return "Decoding final image";
+            case 5: return "Complete";
+            case 6: return "Cancelled";
+            case 7: return "Error";
+            default: return "Idle / starting";
+        }
+    }
+
+    private void appendConsole(String source, String message) {
+        if (message == null || message.isEmpty()) return;
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            uiHandler.post(() -> appendConsole(source, message));
+            return;
+        }
+        String timestamp = new SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(new Date());
+        String[] lines = message.replace("\r", "").split("\n");
+        for (String line : lines) {
+            if (line.isEmpty()) continue;
+            consoleBuffer.append(timestamp).append(" [").append(source).append("] ").append(line).append('\n');
+        }
+        trimConsoleBuffer();
+        refreshConsoleText();
+    }
+
+    private void appendConsoleRaw(String raw) {
+        if (raw == null || raw.isEmpty()) return;
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            uiHandler.post(() -> appendConsoleRaw(raw));
+            return;
+        }
+        consoleBuffer.append(raw);
+        if (consoleBuffer.length() > 0 && consoleBuffer.charAt(consoleBuffer.length() - 1) != '\n') {
+            consoleBuffer.append('\n');
+        }
+        trimConsoleBuffer();
+        refreshConsoleText();
+    }
+
+    private void trimConsoleBuffer() {
+        if (consoleBuffer.length() <= MAX_CONSOLE_CHARS) return;
+        int excess = consoleBuffer.length() - MAX_CONSOLE_CHARS;
+        int newline = consoleBuffer.indexOf("\n", excess);
+        int cut = newline >= 0 ? newline + 1 : excess;
+        consoleBuffer.delete(0, Math.min(cut, consoleBuffer.length()));
+    }
+
+    private void refreshConsoleText() {
+        if (consoleText == null) return;
+        consoleText.setText(consoleBuffer.toString());
+        if (consoleAutoScroll != null && consoleAutoScroll.isChecked()) {
+            consoleText.post(() -> {
+                android.text.Layout layout = consoleText.getLayout();
+                if (layout == null) return;
+                int scroll = layout.getLineTop(consoleText.getLineCount()) - consoleText.getHeight();
+                consoleText.scrollTo(0, Math.max(0, scroll));
+            });
+        }
+    }
+
+    private void clearConsole() {
+        consoleBuffer.setLength(0);
+        try { nativeDrainLogs(); } catch (Throwable ignored) {}
+        appendConsole("APP", "Console cleared.");
+    }
+
+    private void copyConsole() {
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        if (clipboard == null) {
+            toast("Clipboard service unavailable.");
+            return;
+        }
+        clipboard.setPrimaryClip(ClipData.newPlainText("Local Flux Studio console", consoleBuffer.toString()));
+        toast("Console copied.");
+    }
+
+    private void saveConsoleLog() {
+        String log = consoleBuffer.toString();
+        if (log.isEmpty()) log = "Local Flux Studio console is empty.\n";
+        final String content = log;
+        diagnosticsWorker.execute(() -> {
+            try {
+                String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date());
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.Downloads.DISPLAY_NAME, "local-flux-console-" + stamp + ".txt");
+                values.put(MediaStore.Downloads.MIME_TYPE, "text/plain");
+                values.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/LocalFluxStudio");
+                values.put(MediaStore.Downloads.IS_PENDING, 1);
+                Uri uri = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+                if (uri == null) throw new Exception("MediaStore insert failed");
+                try (OutputStream out = getContentResolver().openOutputStream(uri)) {
+                    if (out == null) throw new Exception("Could not open output stream");
+                    out.write(content.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                } catch (Exception e) {
+                    getContentResolver().delete(uri, null, null);
+                    throw e;
+                }
+                values.clear();
+                values.put(MediaStore.Downloads.IS_PENDING, 0);
+                getContentResolver().update(uri, values, null, null);
+                runOnUiThread(() -> toast("Console saved to Downloads/LocalFluxStudio."));
+            } catch (Exception e) {
+                runOnUiThread(() -> toast("Log save failed: " + e.getMessage()));
+            }
+        });
+    }
+
+    private TelemetrySnapshot collectTelemetry() {
+        long now = SystemClock.elapsedRealtime();
+        int cores = Math.max(1, Runtime.getRuntime().availableProcessors());
+
+        long processCpu = android.os.Process.getElapsedCpuTime();
+        double appCpuPct = -1.0;
+        double coreEquivalent = -1.0;
+        if (prevProcessCpuMs >= 0 && prevProcessWallMs >= 0 && now > prevProcessWallMs) {
+            long cpuDelta = Math.max(0L, processCpu - prevProcessCpuMs);
+            long wallDelta = Math.max(1L, now - prevProcessWallMs);
+            coreEquivalent = (double) cpuDelta / (double) wallDelta;
+            appCpuPct = Math.min(100.0, (coreEquivalent / cores) * 100.0);
+        }
+        prevProcessCpuMs = processCpu;
+        prevProcessWallMs = now;
+
+        double systemCpuPct = readSystemCpuPercent();
+
+        ActivityManager am = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
+        ActivityManager.MemoryInfo sysMem = new ActivityManager.MemoryInfo();
+        if (am != null) am.getMemoryInfo(sysMem);
+
+        Debug.MemoryInfo processMem = new Debug.MemoryInfo();
+        Debug.getMemoryInfo(processMem);
+        long pssBytes = Math.max(0L, (long) processMem.getTotalPss()) * 1024L;
+        long rssBytes = readProcRssBytes();
+        Runtime rt = Runtime.getRuntime();
+        long javaHeap = Math.max(0L, rt.totalMemory() - rt.freeMemory());
+        long nativeHeap = Math.max(0L, Debug.getNativeHeapAllocatedSize());
+
+        long[] cpuFreq = readCpuFrequencyStats(cores);
+        double gpuLoad = readGpuLoadPercent();
+        long gpuFreq = readGpuFrequencyHz();
+
+        PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+        int thermal = pm != null ? pm.getCurrentThermalStatus() : -1;
+        float batteryTemp = readBatteryTemperatureC();
+
+        long nativeAge = lastNativeEventUptimeMs > 0
+                ? Math.max(0L, now - lastNativeEventUptimeMs) : -1L;
+
+        String gpuDevice = extractGpuDevice(runtimeInfo);
+        String cpuLine = "CPU app " + percentOrNA(appCpuPct)
+                + (coreEquivalent >= 0 ? String.format(Locale.US, " · %.2f cores", coreEquivalent) : "")
+                + " | system " + percentOrNA(systemCpuPct)
+                + " | " + cpuFreqText(cpuFreq);
+        String memoryLine = "RAM PSS " + humanBytes(pssBytes)
+                + (rssBytes > 0 ? " · RSS " + humanBytes(rssBytes) : "")
+                + " | available " + humanBytes(sysMem.availMem)
+                + " / " + humanBytes(sysMem.totalMem);
+        String heapLine = "Heap Java " + humanBytes(javaHeap)
+                + " · native " + humanBytes(nativeHeap);
+        String gpuLine = "GPU " + gpuDevice
+                + " | load " + percentOrNA(gpuLoad)
+                + " | clock " + frequencyText(gpuFreq);
+        String thermalLine = "Thermal " + thermalText(thermal)
+                + (Float.isNaN(batteryTemp) ? "" : String.format(Locale.US, " · battery %.1f°C", batteryTemp))
+                + " | native log " + (nativeAge < 0 ? "none yet" : formatDurationShort(nativeAge) + " ago");
+
+        String display = cpuLine + "\n" + memoryLine + "\n" + heapLine + "\n" + gpuLine + "\n" + thermalLine;
+        String compact = cpuLine + " | " + memoryLine + " | " + gpuLine + " | " + thermalLine;
+        return new TelemetrySnapshot(display, compact);
+    }
+
+    private String percentOrNA(double value) {
+        return value < 0 || Double.isNaN(value)
+                ? "N/A"
+                : String.format(Locale.US, "%.1f%%", Math.max(0.0, Math.min(100.0, value)));
+    }
+
+    private String cpuFreqText(long[] stats) {
+        if (stats == null || stats[0] <= 0) return "CPU clock N/A";
+        return "CPU avg " + frequencyText(stats[0]) + " · max " + frequencyText(stats[1]);
+    }
+
+    private String frequencyText(long hz) {
+        if (hz <= 0) return "N/A";
+        return String.format(Locale.US, "%.0f MHz", hz / 1_000_000.0);
+    }
+
+    private String formatDurationShort(long ms) {
+        if (ms < 1000) return ms + " ms";
+        if (ms < 60_000) return String.format(Locale.US, "%.1f s", ms / 1000.0);
+        return String.format(Locale.US, "%.1f min", ms / 60_000.0);
+    }
+
+    private String thermalText(int status) {
+        if (status == PowerManager.THERMAL_STATUS_NONE) return "NONE";
+        if (status == PowerManager.THERMAL_STATUS_LIGHT) return "LIGHT";
+        if (status == PowerManager.THERMAL_STATUS_MODERATE) return "MODERATE";
+        if (status == PowerManager.THERMAL_STATUS_SEVERE) return "SEVERE";
+        if (status == PowerManager.THERMAL_STATUS_CRITICAL) return "CRITICAL";
+        if (status == PowerManager.THERMAL_STATUS_EMERGENCY) return "EMERGENCY";
+        if (status == PowerManager.THERMAL_STATUS_SHUTDOWN) return "SHUTDOWN";
+        return "N/A";
+    }
+
+    private float readBatteryTemperatureC() {
+        try {
+            Intent battery = registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+            if (battery == null) return Float.NaN;
+            int tenths = battery.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Integer.MIN_VALUE);
+            return tenths == Integer.MIN_VALUE ? Float.NaN : tenths / 10f;
+        } catch (Throwable ignored) {
+            return Float.NaN;
+        }
+    }
+
+    private double readSystemCpuPercent() {
+        try {
+            String line = readFirstLine("/proc/stat");
+            if (line == null || !line.startsWith("cpu ")) return -1;
+            String[] p = line.trim().split("\\s+");
+            long total = 0L;
+            for (int i = 1; i < p.length; i++) total += Long.parseLong(p[i]);
+            long idle = Long.parseLong(p[4]) + (p.length > 5 ? Long.parseLong(p[5]) : 0L);
+            double result = -1;
+            if (prevSystemCpuTotal >= 0 && total > prevSystemCpuTotal) {
+                long dt = total - prevSystemCpuTotal;
+                long di = Math.max(0L, idle - prevSystemCpuIdle);
+                if (dt > 0) result = 100.0 * (dt - di) / dt;
+            }
+            prevSystemCpuTotal = total;
+            prevSystemCpuIdle = idle;
+            return result;
+        } catch (Throwable ignored) {
+            return -1;
+        }
+    }
+
+    private long[] readCpuFrequencyStats(int cores) {
+        long sumHz = 0L;
+        long maxHz = 0L;
+        int count = 0;
+        for (int i = 0; i < cores; i++) {
+            long raw = readLongFile("/sys/devices/system/cpu/cpu" + i + "/cpufreq/scaling_cur_freq");
+            if (raw <= 0) continue;
+            long hz = raw > 10_000_000L ? raw : raw * 1000L;
+            sumHz += hz;
+            maxHz = Math.max(maxHz, hz);
+            count++;
+        }
+        return count == 0 ? new long[]{0L, 0L} : new long[]{sumHz / count, maxHz};
+    }
+
+    private double readGpuLoadPercent() {
+        try {
+            String line = readFirstLine("/sys/class/kgsl/kgsl-3d0/gpubusy");
+            if (line == null) return -1;
+            String[] p = line.trim().split("\\s+");
+            if (p.length < 2) return -1;
+            long busy = Long.parseLong(p[0]);
+            long total = Long.parseLong(p[1]);
+            double result = -1;
+            if (prevGpuBusy >= 0 && prevGpuTotal >= 0 && busy >= prevGpuBusy && total > prevGpuTotal) {
+                long db = busy - prevGpuBusy;
+                long dt = total - prevGpuTotal;
+                if (dt > 0) result = 100.0 * db / dt;
+            } else if (total > 0) {
+                result = 100.0 * busy / total;
+            }
+            prevGpuBusy = busy;
+            prevGpuTotal = total;
+            return Math.max(0.0, Math.min(100.0, result));
+        } catch (Throwable ignored) {
+            return -1;
+        }
+    }
+
+    private long readGpuFrequencyHz() {
+        String[] paths = {
+                "/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq",
+                "/sys/class/kgsl/kgsl-3d0/gpuclk"
+        };
+        for (String path : paths) {
+            long raw = readLongFile(path);
+            if (raw <= 0) continue;
+            if (raw < 10_000_000L) return raw * 1000L;
+            return raw;
+        }
+        return 0L;
+    }
+
+    private long readProcRssBytes() {
+        try (BufferedReader reader = new BufferedReader(new FileReader("/proc/self/status"))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (!line.startsWith("VmRSS:")) continue;
+                String[] p = line.trim().split("\\s+");
+                if (p.length >= 2) return Long.parseLong(p[1]) * 1024L;
+            }
+        } catch (Throwable ignored) {}
+        return 0L;
+    }
+
+    private String extractGpuDevice(String info) {
+        if (info == null || info.isEmpty()) return "N/A";
+        int i = info.indexOf("Devices:");
+        if (i < 0) return "Vulkan";
+        String value = info.substring(i + 8).trim();
+        int line = value.indexOf('\n');
+        if (line >= 0) value = value.substring(0, line).trim();
+        return value.isEmpty() ? "Vulkan" : value;
+    }
+
+    private String readFirstLine(String path) {
+        try (BufferedReader reader = new BufferedReader(new FileReader(path))) {
+            return reader.readLine();
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private long readLongFile(String path) {
+        try {
+            String line = readFirstLine(path);
+            return line == null ? 0L : Long.parseLong(line.trim());
+        } catch (Throwable ignored) {
+            return 0L;
+        }
+    }
+
     private int[] selectedDimensions() {
         int position = sizeSpinner == null ? 0 : sizeSpinner.getSelectedItemPosition();
         int[][] presets = {
@@ -1127,10 +1639,18 @@ public class MainActivity extends Activity {
         int steps = snapshot[2];
         int elapsed = snapshot[3];
 
+        int previousPhase = lastProgressPhase;
+        int previousStep = lastProgressStep;
         if (phase != lastProgressPhase || step != lastProgressStep) {
             lastProgressPhase = phase;
             lastProgressStep = step;
             lastProgressChangeMs = SystemClock.elapsedRealtime();
+        }
+        if (phase != previousPhase) {
+            appendConsole("PHASE", phaseName(phase) + " · step=" + step + "/" + steps
+                    + " · elapsed=" + formatElapsed(elapsed));
+        } else if (phase == 3 && step != previousStep) {
+            appendConsole("STEP", "Sampling " + step + "/" + steps + " · elapsed=" + formatElapsed(elapsed));
         }
 
         long unchangedMs = Math.max(0L, SystemClock.elapsedRealtime() - lastProgressChangeMs);
@@ -1494,13 +2014,15 @@ public class MainActivity extends Activity {
     }
 
     private void switchTab(int tab) {
-        if (generationCard == null || modelCard == null || faceCard == null) return;
+        if (generationCard == null || modelCard == null || faceCard == null || consoleCard == null) return;
         generationCard.setVisibility(tab == 0 ? View.VISIBLE : View.GONE);
         modelCard.setVisibility(tab == 1 ? View.VISIBLE : View.GONE);
         faceCard.setVisibility(tab == 2 ? View.VISIBLE : View.GONE);
+        consoleCard.setVisibility(tab == 3 ? View.VISIBLE : View.GONE);
         setTabState(createTab, tab == 0);
         setTabState(modelsTab, tab == 1);
         setTabState(faceTab, tab == 2);
+        setTabState(consoleTab, tab == 3);
     }
 
     private void setTabState(Button b, boolean active) {
@@ -1863,10 +2385,13 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         generationActive = false;
+        diagnosticsStopped = true;
         uiHandler.removeCallbacks(progressPoller);
+        uiHandler.removeCallbacks(diagnosticsPoller);
         prefs.edit().putBoolean("generation_in_progress", false).apply();
         nativeCancel();
         worker.shutdownNow();
+        diagnosticsWorker.shutdownNow();
         super.onDestroy();
     }
 }
