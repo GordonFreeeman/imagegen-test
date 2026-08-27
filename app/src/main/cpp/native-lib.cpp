@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <ctime>
 #include <deque>
 #include <limits>
