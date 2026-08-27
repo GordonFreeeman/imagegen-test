@@ -198,3 +198,95 @@ APK version: 1.1.1 (versionCode 3), targetSdk 36, minSdk 29.
 ## Final status
 
 Both reviewers approved application commit `c26e8cc3de45ec3636d503da126d9bbd92e31545`. The subsequent review-log commit only updates this document and does not alter the APK source or resources.
+
+
+# v1.2.0 Progress / Preview / Resolution / Signing Review
+
+Final reviewed application commit: `cc5aae7292258a9016db9ba15e3be5c2c10dbbb1`  
+Successful CI run: `33073349244`  
+APK version: 1.2.0 (versionCode 4), targetSdk 36, minSdk 29.
+
+## Iteration 1
+
+### Logic Inquisitor
+
+**Verdict:** REJECTED
+
+**Blocking findings:**
+
+1. VAE-related log messages emitted during model initialization could be misclassified as the final VAE decode phase.
+   - Evidence: `android_log_cb` switched to `PHASE_DECODING` whenever a line contained both a decode marker and VAE/first-stage marker, regardless of the current generation phase.
+   - Expected behavior: final decode status may only be entered after conditioning/sampling has begun.
+   - Required correction: constrain decode-log classification to phases CONDITIONING through DECODING.
+   - Severity: Medium
+
+**Non-blocking improvements:**
+- Preview rendering could later be moved off the UI thread for very large custom resolutions, although it is opt-in and projected previews are already relatively lightweight.
+
+**Verification performed:**
+- Inspected the complete JNI progress/preview state flow in `native-lib.cpp`.
+- Inspected Java polling, custom-resolution validation, preview rendering, stall detection, cancellation and final-image handoff in `MainActivity.java`.
+- Inspected signing configuration and CI certificate verification.
+
+### Aesthetic Executioner
+
+**Verdict:** APPROVED
+
+**Blocking findings:**
+- None.
+
+**Non-blocking improvements:**
+- A future physical-device pass could refine spacing around the two custom dimension fields at extreme Android font scaling.
+
+**Verification performed:**
+- Inspected the complete revised Create screen.
+- Checked the custom width/height row, preview toggle/interval control, horizontal progress bar, progress title, status text and result preview area for fixed-size overflow risks.
+- Confirmed all controls remain inside the existing vertical ScrollView and rectangular presets remain available.
+- No Android emulator or physical-device renderer was available in the build environment.
+
+## Iteration 2 — Final
+
+### Logic Inquisitor
+
+**Verdict:** APPROVED
+
+**Blocking findings:**
+- None.
+
+**Non-blocking improvements:**
+- True percentage progress during model-weight loading is not available from stable-diffusion.cpp's public callback API; the implementation correctly reports it as an indeterminate named phase with elapsed/stall time instead of fabricating a percentage.
+- Intermediate preview creation is optional because it adds some runtime and memory overhead.
+
+**Verification performed:**
+- Verified native progress phases: loading, conditioning, sampling, VAE decode, complete, cancelled, error.
+- Verified real stable-diffusion.cpp `sd_set_progress_callback` integration.
+- Verified optional `sd_set_preview_callback` integration using projected denoised previews with configurable intervals of 1/2/4 steps.
+- Verified thread-safe native preview copying and Java polling through `nativeProgressSnapshot` and `nativePreviewSnapshot`.
+- Verified stall detection reports unchanged native phase/step after three minutes without declaring a false freeze.
+- Verified custom resolutions support rectangular width/height from 256 to 1536, requiring multiples of 64.
+- Verified preset square and portrait/landscape sizes remain available.
+- Verified versionCode 4 and versionName 1.2.0.
+- Verified persistent sideload signing configuration and CI certificate pinning.
+- GitHub Actions run 33073349244 passed build, lint, APK assembly, targetSdk 36 checks, 16 KB alignment and signing-certificate verification.
+
+### Aesthetic Executioner
+
+**Verdict:** APPROVED
+
+**Blocking findings:**
+- None.
+
+**Verification performed:**
+- Re-inspected the complete final Create screen after the decode-phase correction.
+- Confirmed no UI/resource changes after the already-approved layout review.
+- Confirmed progress/status hierarchy remains readable and live previews reuse the existing result frame instead of adding another large competing surface.
+- No emulator or physical-device rendering was available.
+
+## Final status
+
+Both reviewers approved application commit `cc5aae7292258a9016db9ba15e3be5c2c10dbbb1`. The subsequent review-log commit only updates this document and does not change the APK source/resources.
+
+The v1.2.0 APK is signed with persistent sideload certificate SHA-256:
+`6c4c89639285c16e367171b085115e436459644714eb81d4c22fd6e2164e879c`.
+
+Because v1.1.1 was signed by a different ephemeral GitHub Actions debug key, Android cannot update v1.1.1 in place. One final uninstall is required for the transition to v1.2.0. All future APKs signed with the persistent v1.2.0 key can update in place when versionCode increases.
