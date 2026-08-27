@@ -74,6 +74,37 @@ s = s.replace(old, new, 1)
 p.write_text(s)
 PY
 
+# Local Flux Studio: allow the Android app to keep Qwen graph-cut segmented
+# while disabling graph cutting specifically for the FLUX diffusion runner.
+# FLUX keeps its compute/parameter buffers alive across denoising steps, so a
+# resident diffusion model avoids the cache-rotation path that has been crashing
+# on Adreno while still releasing Qwen before diffusion starts.
+python3 - <<'PY'
+from pathlib import Path
+
+p = Path("vendor/stable-diffusion.cpp/src/stable-diffusion.cpp")
+s = p.read_text()
+old = '''    size_t max_graph_vram_bytes_for_module(SDBackendModule module) {
+        return max_vram_assignment.bytes_for_backend(backend_for(module));
+    }
+'''
+new = '''    size_t max_graph_vram_bytes_for_module(SDBackendModule module) {
+        if (module == SDBackendModule::DIFFUSION) {
+            const char* resident = std::getenv("LOCALFLUX_DIFFUSION_RESIDENT");
+            if (resident != nullptr && resident[0] == '1') {
+                LOG_INFO("LocalFlux: diffusion graph cutting disabled; keeping diffusion resident");
+                return 0;
+            }
+        }
+        return max_vram_assignment.bytes_for_backend(backend_for(module));
+    }
+'''
+if old not in s:
+    raise SystemExit("Pinned StableDiffusionGGML layout changed; refusing to apply resident diffusion patch")
+s = s.replace(old, new, 1)
+p.write_text(s)
+PY
+
 # The pinned runner can free Vulkan scheduler/parameter buffers immediately after
 # Qwen conditioning. Force completion of queued backend work first. This is
 # especially important on Android where native process aborts bypass Java error
