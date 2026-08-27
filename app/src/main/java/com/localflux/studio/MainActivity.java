@@ -678,23 +678,39 @@ public class MainActivity extends Activity {
 
         card.addView(fieldLabel("Text encoder backend"));
         textEncoderModeSpinner = styledSpinner(new String[]{
-                "Vulkan GPU · fastest · recommended",
-                "CPU RAM · compatibility",
+                "Turbo CPU · DOTPROD/I8MM · recommended",
+                "Vulkan Qwen · experimental · may crash",
                 "CPU + disk · minimum RAM · very slow"
         });
+
+        // v1.3.1 used mode 0 for Vulkan and mode 1 for the old generic CPU path.
+        // v1.3.2 changes the schema so both upgrade safely to the optimized CPU path.
         int savedTeMode;
-        if (prefs.contains("text_encoder_mode")) {
-            savedTeMode = Math.max(0, Math.min(2, prefs.getInt("text_encoder_mode", 0)));
+        int teSchema = prefs.getInt("text_encoder_mode_schema", 0);
+        if (teSchema < 2) {
+            int oldMode;
+            if (prefs.contains("text_encoder_mode")) {
+                oldMode = Math.max(0, Math.min(2, prefs.getInt("text_encoder_mode", 0)));
+            } else {
+                oldMode = prefs.getBoolean("extreme_ram_saver", false) ? 2 : 0;
+            }
+            savedTeMode = oldMode == 2 ? 2 : 0;
+            prefs.edit()
+                    .putInt("text_encoder_mode", savedTeMode)
+                    .putInt("text_encoder_mode_schema", 2)
+                    .remove("extreme_ram_saver")
+                    .apply();
         } else {
-            // Migrate the old checkbox: checked meant disk-backed CPU, unchecked becomes the new
-            // high-performance Vulkan default on capable Snapdragon devices.
-            savedTeMode = prefs.getBoolean("extreme_ram_saver", false) ? 2 : 0;
-            prefs.edit().putInt("text_encoder_mode", savedTeMode).apply();
+            savedTeMode = Math.max(0, Math.min(2, prefs.getInt("text_encoder_mode", 0)));
         }
+
         textEncoderModeSpinner.setSelection(savedTeMode);
         textEncoderModeSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
-                prefs.edit().putInt("text_encoder_mode", Math.max(0, Math.min(2, position))).apply();
+                prefs.edit()
+                        .putInt("text_encoder_mode", Math.max(0, Math.min(2, position)))
+                        .putInt("text_encoder_mode_schema", 2)
+                        .apply();
             }
             @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
         });
@@ -702,7 +718,7 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(52)));
 
         TextView ramHint = text(
-                "Vulkan is recommended for FLUX.2 on your Snapdragon: Qwen executes on Adreno while its weights stay CPU-backed and are staged under the GPU memory budget. CPU RAM is the fallback for Vulkan incompatibilities; CPU + disk is only for severe memory pressure.",
+                "Turbo CPU is built specifically for modern Snapdragon arm64: Q4_K_M uses GGML DOTPROD/I8MM kernels, CPU flash attention is enabled, and Qwen runner buffers are released after prompt conditioning before FLUX sampling. Vulkan Qwen stays available only as an experimental option because it can crash some Adreno drivers.",
                 11, MUTED, false);
         ramHint.setPadding(dp(2), dp(4), dp(2), dp(5));
         card.addView(ramHint);
@@ -1118,7 +1134,20 @@ public class MainActivity extends Activity {
                 + (activeLoras > 0 ? " · LoRA×" + activeLoras : "");
 
         worker.execute(() -> {
+            int previousPriority;
             try {
+                previousPriority = android.os.Process.getThreadPriority(android.os.Process.myTid());
+            } catch (Throwable ignored) {
+                previousPriority = android.os.Process.THREAD_PRIORITY_DEFAULT;
+            }
+            try {
+                // Long-running native inference should be scheduled like visible foreground work.
+                // Native worker threads created beneath this call inherit the caller's nice level.
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DISPLAY);
+                appendConsole("APP", "Inference thread promoted for foreground compute · "
+                        + textEncoderModeLabel(textEncoderMode)
+                        + (textEncoderMode == 0 ? " · ARMv8.6 DOTPROD/I8MM + CPU flash attention" : ""));
+
                 int[] pixels = nativeGenerate(
                         model, diffusion, vae, clipL, t5, llm,
                         prompt, negativePrompt, width, height, steps,
@@ -1147,6 +1176,10 @@ public class MainActivity extends Activity {
                     appendConsole("ERROR", "Generation failed: " + safeMessage(e));
                     setGenerating(false);
                 });
+            } finally {
+                try {
+                    android.os.Process.setThreadPriority(previousPriority);
+                } catch (Throwable ignored) {}
             }
         });
     }
@@ -1662,8 +1695,8 @@ public class MainActivity extends Activity {
 
     private String textEncoderModeLabel(int mode) {
         if (mode == 2) return "CPU+disk";
-        if (mode == 1) return "CPU RAM";
-        return "Vulkan GPU";
+        if (mode == 1) return "Vulkan EXP";
+        return "Turbo CPU";
     }
 
     private int[] selectedDimensions() {
@@ -1760,9 +1793,9 @@ public class MainActivity extends Activity {
                     int teMode = selectedTextEncoderMode();
                     status.setText(teMode == 2
                             ? "Disk-backed Qwen/LoRA tensors are being loaded on demand" + stall
-                            : teMode == 0
-                                ? "Preparing CPU-backed Qwen tensors for Vulkan execution" + stall
-                                : "Preparing Qwen/LoRA tensors for CPU execution" + stall);
+                            : teMode == 1
+                                ? "Preparing CPU-backed Qwen tensors for experimental Vulkan execution" + stall
+                                : "Preparing Qwen/LoRA tensors for optimized ARM CPU execution" + stall);
                 } else {
                     progress.setIndeterminate(true);
                     progressTitle.setText("Encoding prompt / preparing latents" + elapsedText);
@@ -2156,7 +2189,7 @@ public class MainActivity extends Activity {
     private String profileDescription(int p) {
         switch (p) {
             case 1:
-                return "BEST PHONE FIT · FLUX.2 Klein 4B\nNeeds only Diffusion / transformer + FLUX.2 VAE/AE + Qwen3 4B LLM. CLIP-L, T5XXL and Full checkpoint are hidden because this profile does not use them. Vulkan GPU text encoding is recommended on Snapdragon; CPU modes remain available as fallbacks.";
+                return "BEST PHONE FIT · FLUX.2 Klein 4B\nNeeds only Diffusion / transformer + FLUX.2 VAE/AE + Qwen3 4B LLM. CLIP-L, T5XXL and Full checkpoint are hidden because this profile does not use them. Turbo CPU text encoding is recommended on Snapdragon; it uses DOTPROD/I8MM for Q4_K_M and releases Qwen runner buffers before FLUX sampling.";
             case 2:
                 return "QUALITY PHONE PROFILE · FLUX.2 Klein Base 4B\nSame files as Klein 4B, but the base model is intended for a fuller ~20-step sampling run and higher CFG.";
             case 3:
