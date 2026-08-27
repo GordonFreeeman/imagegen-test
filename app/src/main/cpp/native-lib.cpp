@@ -292,10 +292,12 @@ sd_ctx_t* ensure_context(
         // - retain CPU and disk-backed TE fallbacks for compatibility / extreme RAM pressure
         // - keep VAE on CPU and reserve ~1 GiB GPU headroom via graph-cut segmentation
         // Text encoder modes:
-        // 0 = Vulkan runtime + CPU-resident params (recommended on high-end Snapdragon)
-        // 1 = CPU runtime + CPU-resident params (compatibility)
-        // 2 = CPU runtime + disk-backed params (minimum RAM, slowest)
-        if (te_mode == 0) {
+        // 0 = optimized CPU runtime + CPU-resident params (default)
+        //     The APK is compiled for ARMv8.6 DOTPROD/I8MM, so Q4_K_M uses the
+        //     fast GGML ARM kernels instead of the baseline NEON path.
+        // 1 = Vulkan text encoder (experimental; some Adreno drivers crash)
+        // 2 = optimized CPU runtime + disk-backed params (minimum RAM, slowest)
+        if (te_mode == 1) {
             p.backend = "diffusion=gpu,te=gpu,vae=cpu";
             p.params_backend = "diffusion=cpu,te=cpu,vae=cpu";
         } else if (te_mode == 2) {
@@ -309,17 +311,18 @@ sd_ctx_t* ensure_context(
         p.stream_layers = true;
         p.auto_fit = false;
 
-        // Vulkan flash-attention support varies by driver/model. Streaming+segmentation is the
-        // primary memory strategy here; disable FA for stability on mobile Vulkan.
-        p.flash_attn = false;
+        // Text-encoder flash attention is supported by the CPU backend and reduces
+        // Qwen attention work. Keep it disabled only for the experimental Vulkan TE path.
+        p.flash_attn = te_mode != 1;
         p.diffusion_flash_attn = false;
 
-        const char* te_runtime = te_mode == 0 ? "gpu" : "cpu";
+        const char* te_runtime = te_mode == 1 ? "gpu-experimental" : "cpu-armv8.6";
         const char* te_params = te_mode == 2 ? "disk" : "cpu";
         char mode_line[320];
         std::snprintf(mode_line, sizeof(mode_line),
-                      "Loading split-model context in mobile-safe mode "
-                      "(diffusion=gpu, te=%s, vae=cpu, params diffusion=cpu te=%s, max_vram=-1, stream_layers=1)",
+                      "Loading split-model context "
+                      "(diffusion=gpu, te=%s, vae=cpu, params diffusion=cpu te=%s, max_vram=-1, stream_layers=1; "
+                      "TE runner buffers released after conditioning)",
                       te_runtime, te_params);
         push_console_log(SD_LOG_INFO, mode_line);
         __android_log_print(ANDROID_LOG_INFO, TAG, "%s", mode_line);
@@ -360,6 +363,7 @@ Java_com_localflux_studio_MainActivity_nativeSystemInfo(JNIEnv* env, jclass) {
     });
 
     std::string out = sd_get_system_info() ? sd_get_system_info() : "stable-diffusion.cpp";
+    out += "\nCPU target: ARMv8.6 + DOTPROD + I8MM; KleidiAI enabled for Q4_0/Q8_0";
     const size_t n = sd_list_devices(nullptr, 0);
     if (n > 0) {
         std::vector<char> buf(n + 1, 0);
