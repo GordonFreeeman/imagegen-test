@@ -10,6 +10,15 @@ set(SD_WEBP OFF CACHE BOOL "" FORCE)
 set(SD_WEBM OFF CACHE BOOL "" FORCE)
 set(SD_VULKAN ON CACHE BOOL "" FORCE)
 set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
+
+# This APK targets modern Snapdragon/Oryon-class arm64 hardware.
+# Q4_K_M does not use KleidiAI directly, but it benefits substantially from
+# the regular GGML ARM DOTPROD/I8MM kernels. KleidiAI additionally accelerates
+# Q4_0/Q8_0 text encoders if the user chooses those formats.
+set(GGML_CPU_ARM_ARCH "armv8.6-a+dotprod+i8mm" CACHE STRING "" FORCE)
+set(GGML_CPU_KLEIDIAI ON CACHE BOOL "" FORCE)
+set(GGML_CPU_REPACK ON CACHE BOOL "" FORCE)
+
 set(SD_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(SD_BUILD_SHARED_GGML_LIB OFF CACHE BOOL "" FORCE)
 
