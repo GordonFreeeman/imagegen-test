@@ -900,15 +900,23 @@ public class MainActivity extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         final long finalSeed = seed;
+        final String negativePrompt = negativeInput.getText().toString();
+        final boolean useVaeTiling = vaeTilingCheck.isChecked();
+        final boolean useLivePreview = livePreviewCheck.isChecked();
+        final int previewInterval = selectedPreviewInterval();
+        final String[] loraPaths = loraPathsForGeneration();
+        final float[] loraStrengths = loraStrengthsForGeneration();
+        final boolean useExtremeRamSaver = extremeRamSaverCheck.isChecked();
+
         worker.execute(() -> {
             try {
                 int[] pixels = nativeGenerate(
                         model, diffusion, vae, clipL, t5, llm,
-                        prompt, negativeInput.getText().toString(), width, height, steps,
-                        textCfg, distilledGuidance, finalSeed, vaeTilingCheck.isChecked(),
-                        livePreviewCheck.isChecked(), selectedPreviewInterval(),
-                        loraPathsForGeneration(), loraStrengthsForGeneration(),
-                        extremeRamSaverCheck.isChecked());
+                        prompt, negativePrompt, width, height, steps,
+                        textCfg, distilledGuidance, finalSeed, useVaeTiling,
+                        useLivePreview, previewInterval,
+                        loraPaths, loraStrengths,
+                        useExtremeRamSaver);
                 if (pixels == null || pixels.length != width * height) {
                     throw new Exception("Native generator returned no image");
                 }
