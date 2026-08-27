@@ -38,6 +38,7 @@ std::atomic<int> g_steps{0};
 std::atomic<int64_t> g_started_ms{0};
 std::atomic<int> g_preview_version{0};
 std::atomic<int> g_preview_step{0};
+std::atomic<int> g_expected_sample_steps{0};
 std::mutex g_preview_mutex;
 std::vector<jint> g_preview_argb;
 int g_preview_width = 0;
@@ -74,10 +75,24 @@ void reset_progress_state() {
     g_preview_version.store(0);
 }
 
+void load_progress_cb(int step, int steps, float, void*) {
+    const int safe_steps = std::max(0, steps);
+    const int safe_step = std::max(0, std::min(step, safe_steps > 0 ? safe_steps : step));
+    set_phase(PHASE_LOADING, safe_step, safe_steps);
+}
+
 void progress_cb(int step, int steps, float, void*) {
     const int safe_steps = std::max(0, steps);
     const int safe_step = std::max(0, std::min(step, safe_steps > 0 ? safe_steps : step));
-    set_phase(PHASE_SAMPLING, safe_step, safe_steps);
+    const int expected = g_expected_sample_steps.load();
+
+    if (expected > 0 && safe_steps == expected) {
+        set_phase(PHASE_SAMPLING, safe_step, safe_steps);
+    } else {
+        // Runtime LoRA / lazily disk-backed model tensors can also report byte/tensor progress
+        // during generate_image(). Keep those distinct from the requested sampling steps.
+        set_phase(PHASE_CONDITIONING, safe_step, safe_steps);
+    }
 }
 
 void preview_cb(int step, int frame_count, sd_image_t* frames, bool, void*) {
@@ -345,10 +360,12 @@ Java_com_localflux_studio_MainActivity_nativeGenerate(
     }
 
     reset_progress_state();
+    g_expected_sample_steps.store(steps);
 
-    // stable-diffusion.cpp also uses the global progress callback while loading model tensors.
-    // Keep it disabled during context creation so tensor counts cannot be mistaken for sampling steps.
-    sd_set_progress_callback(nullptr, nullptr);
+    // Model-loader and sampler progress share one global callback in stable-diffusion.cpp.
+    // Use a dedicated loading callback during context creation, then swap to the sampler-aware
+    // callback before generation so tensor counts can never masquerade as denoising steps.
+    sd_set_progress_callback(load_progress_cb, nullptr);
     sd_set_preview_callback(nullptr, PREVIEW_NONE, 1, true, false, nullptr);
 
     sd_ctx_t* ctx = ensure_context(env, model, diffusion, vae, clipL, t5, llm);
@@ -357,7 +374,7 @@ Java_com_localflux_studio_MainActivity_nativeGenerate(
         return nullptr;
     }
 
-    set_phase(PHASE_CONDITIONING, 0, steps);
+    set_phase(PHASE_CONDITIONING, 0, 0);
     sd_set_progress_callback(progress_cb, nullptr);
     if (livePreview == JNI_TRUE) {
         sd_set_preview_callback(preview_cb, PREVIEW_PROJ,
