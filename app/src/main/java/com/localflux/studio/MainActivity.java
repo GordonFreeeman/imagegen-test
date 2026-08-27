@@ -76,7 +76,7 @@ public class MainActivity extends Activity {
             String prompt, String negative, int width, int height, int steps,
             float textCfg, float distilledGuidance, long seed, boolean vaeTiling,
             boolean livePreview, int previewInterval, String[] loraPaths, float[] loraStrengths,
-            int textEncoderMode);
+            int textEncoderMode, int cpuThreads);
     private static native String nativeDrainLogs();
     private static native int[] nativeProgressSnapshot();
     private static native int[] nativePreviewSnapshot(int lastVersion);
@@ -142,6 +142,7 @@ public class MainActivity extends Activity {
     private CheckBox livePreviewCheck;
     private Spinner previewIntervalSpinner;
     private Spinner textEncoderModeSpinner;
+    private Spinner cpuThreadSpinner;
     private Button generateButton;
     private Button cancelButton;
     private ProgressBar progress;
@@ -212,13 +213,25 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static final class ProcMemorySnapshot {
+        final long rssBytes;
+        final long pssBytes;
+        final long swapPssBytes;
+
+        ProcMemorySnapshot(long rssBytes, long pssBytes, long swapPssBytes) {
+            this.rssBytes = rssBytes;
+            this.pssBytes = pssBytes;
+            this.swapPssBytes = swapPssBytes;
+        }
+    }
+
     private final Runnable progressPoller = new Runnable() {
         @Override public void run() {
             if (!generationActive) return;
             try {
                 int[] snapshot = nativeProgressSnapshot();
                 renderProgressSnapshot(snapshot);
-                if (livePreviewCheck != null && livePreviewCheck.isChecked()) {
+                if (lastProgressPhase == 3 && livePreviewCheck != null && livePreviewCheck.isChecked()) {
                     int[] preview = nativePreviewSnapshot(lastPreviewVersion);
                     renderPreviewSnapshot(preview);
                 }
@@ -676,43 +689,57 @@ public class MainActivity extends Activity {
         vaeTilingCheck.setPadding(0, dp(7), 0, dp(4));
         card.addView(vaeTilingCheck);
 
-        card.addView(fieldLabel("Text encoder backend"));
+        card.addView(fieldLabel("Qwen conditioning strategy"));
         textEncoderModeSpinner = styledSpinner(new String[]{
-                "Sprint CPU · Qwen min 64 · recommended",
-                "Balanced CPU · Qwen min 128",
-                "Reference CPU · full 512 Qwen",
-                "Vulkan Qwen · full 512 · experimental",
+                "CPU Fast · min 24 · states 9/18/27 · recommended Q4_0",
+                "CPU Raw · real prompt tokens · states 9/18/27",
+                "CPU Ultra · min 24 · early states 6/12/18 · EXP",
+                "CPU Fast · min 32 · states 9/18/27",
+                "CPU Sprint · min 64 · states 9/18/27",
+                "CPU Balanced · min 128 · states 9/18/27",
+                "CPU Reference · full 512 · states 9/18/27",
+                "Vulkan Qwen · min 32 · EXP",
+                "Vulkan Qwen · min 64 · EXP",
+                "Vulkan Qwen · full 512 · EXP",
                 "CPU + disk · full 512 · emergency"
         });
 
-        // v1.3.3 adds adaptive Klein conditioning. Migrate earlier backend-only
-        // selections while keeping upgrades safe: CPU becomes Sprint, Vulkan
-        // remains Vulkan, and disk remains the emergency disk-backed path.
+        // v1.3.4 expands the conditioning strategy schema. Upgrading the old
+        // default Sprint-64 selection moves to Fast-24 so install-over updates
+        // actually receive the speed fix; explicit conservative modes remain
+        // available and are migrated to their closest equivalent.
         int savedTeMode;
         int teSchema = prefs.getInt("text_encoder_mode_schema", 0);
-        if (teSchema < 3) {
-            int oldMode;
-            if (prefs.contains("text_encoder_mode")) {
-                oldMode = Math.max(0, Math.min(2, prefs.getInt("text_encoder_mode", 0)));
+        if (teSchema < 4) {
+            int oldMode = prefs.contains("text_encoder_mode")
+                    ? Math.max(0, prefs.getInt("text_encoder_mode", 0))
+                    : 0;
+            if (teSchema >= 3) {
+                if (oldMode == 1) savedTeMode = 5;
+                else if (oldMode == 2) savedTeMode = 6;
+                else if (oldMode == 3) savedTeMode = 9;
+                else if (oldMode == 4) savedTeMode = 10;
+                else savedTeMode = 0;
             } else {
-                oldMode = prefs.getBoolean("extreme_ram_saver", false) ? 2 : 0;
+                // Legacy backend-only schemas: old Vulkan -> Vulkan reference,
+                // old disk -> disk reference, everything else -> Fast CPU.
+                savedTeMode = oldMode == 1 ? 9 : (oldMode == 2 ? 10 : 0);
             }
-            savedTeMode = oldMode == 1 ? 3 : (oldMode == 2 ? 4 : 0);
             prefs.edit()
                     .putInt("text_encoder_mode", savedTeMode)
-                    .putInt("text_encoder_mode_schema", 3)
+                    .putInt("text_encoder_mode_schema", 4)
                     .remove("extreme_ram_saver")
                     .apply();
         } else {
-            savedTeMode = Math.max(0, Math.min(4, prefs.getInt("text_encoder_mode", 0)));
+            savedTeMode = Math.max(0, Math.min(10, prefs.getInt("text_encoder_mode", 0)));
         }
 
         textEncoderModeSpinner.setSelection(savedTeMode);
         textEncoderModeSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
                 prefs.edit()
-                        .putInt("text_encoder_mode", Math.max(0, Math.min(4, position)))
-                        .putInt("text_encoder_mode_schema", 3)
+                        .putInt("text_encoder_mode", Math.max(0, Math.min(10, position)))
+                        .putInt("text_encoder_mode_schema", 4)
                         .apply();
             }
             @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
@@ -720,8 +747,26 @@ public class MainActivity extends Activity {
         card.addView(textEncoderModeSpinner, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(52)));
 
+        card.addView(fieldLabel("Qwen CPU threads"));
+        cpuThreadSpinner = styledSpinner(new String[]{
+                "8 threads · Snapdragon 8 Elite",
+                "6 threads · lower thermal load",
+                "4 threads · conservative",
+                "Auto detect · runtime heuristic"
+        });
+        int savedThreadMode = Math.max(0, Math.min(3, prefs.getInt("cpu_thread_mode", 0)));
+        cpuThreadSpinner.setSelection(savedThreadMode);
+        cpuThreadSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
+                prefs.edit().putInt("cpu_thread_mode", Math.max(0, Math.min(3, position))).apply();
+            }
+            @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
+        });
+        card.addView(cpuThreadSpinner, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(52)));
+
         TextView ramHint = text(
-                "Sprint and Balanced avoid the pinned runtime's expensive FLUX.2 Klein behavior of running Qwen over 512 padded input tokens for every prompt. They run Qwen on a 64- or 128-token minimum, then zero-pad the produced embeddings to 512 before FLUX sampling. Reference CPU keeps upstream full-512 behavior for comparison. Q4_0 can use KleidiAI directly; Q4_K_M still uses the ARMv8.6 DOTPROD/I8MM GGML kernels. Vulkan stays experimental because it can crash current Adreno drivers.",
+                "For Qwen3 4B CPU conditioning, Q4_0 is the preferred benchmark in this build because KleidiAI has direct Q4_0/Q8_0 kernels. Q4_K_M uses the ARMv8.6 DOTPROD/I8MM GGML path; q4_1 tensors are not KleidiAI-accelerated. Fast/Raw modes compute far fewer Qwen tokens and zero-pad embeddings to 512 afterwards. Ultra also stops at states 6/12/18 and may reduce prompt quality. Short Vulkan modes use much smaller graphs than the old full-512 Vulkan experiment but can still crash current Adreno drivers.",
                 11, MUTED, false);
         ramHint.setPadding(dp(2), dp(4), dp(2), dp(5));
         card.addView(ramHint);
@@ -772,7 +817,7 @@ public class MainActivity extends Activity {
         progress.setVisibility(View.GONE);
         card.addView(progress, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(10)));
 
-        status = text("Ready. FLUX.2 Klein 4B at 512² with Sprint CPU is the recommended first run on a 16 GB phone.", 12, MUTED, false);
+        status = text("Ready. For Qwen3 4B Q4_0, start with CPU Fast min-24 + 8 threads at 512².", 12, MUTED, false);
         status.setGravity(Gravity.CENTER_HORIZONTAL);
         status.setPadding(dp(5), dp(9), dp(5), dp(10));
         card.addView(status);
@@ -1106,19 +1151,26 @@ public class MainActivity extends Activity {
             seed = -1;
         }
 
+        int requestedTextEncoderMode = selectedTextEncoderMode();
+        int requestedCpuThreads = selectedCpuThreads();
+        String quantHint = qwenQuantHint();
+
         warnThermalIfNeeded();
         appendConsole("APP", "Generation requested · profile=" + MODEL_PROFILES[profile]
                 + " · " + width + "×" + height + " · steps=" + steps
                 + " · CFG=" + String.format(Locale.US, "%.1f", textCfg)
                 + " · distilled=" + String.format(Locale.US, "%.1f", distilledGuidance)
                 + " · preview=" + livePreviewCheck.isChecked()
-                + " · textEncoder=" + textEncoderModeLabel(selectedTextEncoderMode()));
+                + " · textEncoder=" + textEncoderModeLabel(requestedTextEncoderMode)
+                + " · cpuThreads=" + cpuThreadsLabel(requestedCpuThreads)
+                + (quantHint.isEmpty() ? "" : " · Qwen=" + quantHint));
         prefs.edit().putBoolean("generation_in_progress", true).commit();
         setGenerating(true);
         status.setText(diffusion.isEmpty()
                 ? "Loading/caching model stack and generating locally. First run is the slowest…"
-                : "Mobile-safe mode: " + textEncoderModeLabel(selectedTextEncoderMode())
-                    + " text encoding; diffusion streams to Vulkan…");
+                : "Conditioning: " + textEncoderModeLabel(requestedTextEncoderMode)
+                    + " · " + cpuThreadsLabel(requestedCpuThreads)
+                    + "; diffusion streams to Vulkan…");
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         final long finalSeed = seed;
@@ -1128,11 +1180,14 @@ public class MainActivity extends Activity {
         final int previewInterval = selectedPreviewInterval();
         final String[] loraPaths = loraPathsForGeneration();
         final float[] loraStrengths = loraStrengthsForGeneration();
-        final int textEncoderMode = selectedTextEncoderMode();
+        final int textEncoderMode = requestedTextEncoderMode;
+        final int cpuThreads = requestedCpuThreads;
         int activeLoras = 0;
         for (String path : loraPaths) if (path != null && !path.isEmpty()) activeLoras++;
         generationConfigSummary = MODEL_PROFILES[profile] + " · " + width + "×" + height
                 + " · " + steps + " steps · Qwen " + textEncoderModeLabel(textEncoderMode)
+                + " · " + cpuThreadsLabel(cpuThreads)
+                + (quantHint.isEmpty() ? "" : " · " + quantHint)
                 + " · preview " + (useLivePreview ? "ON" : "OFF")
                 + (activeLoras > 0 ? " · LoRA×" + activeLoras : "");
 
@@ -1149,9 +1204,10 @@ public class MainActivity extends Activity {
                 android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DISPLAY);
                 appendConsole("APP", "Inference thread promoted for foreground compute · "
                         + textEncoderModeLabel(textEncoderMode)
-                        + (textEncoderMode <= 2
-                            ? " · ARMv8.6 DOTPROD/I8MM + CPU flash attention + mmap sequential"
-                            : ""));
+                        + " · requested " + cpuThreadsLabel(cpuThreads)
+                        + (isCpuTextEncoderMode(textEncoderMode)
+                            ? " · ARMv8.6 DOTPROD/I8MM + KleidiAI(Q4_0/Q8_0) + CPU flash attention + mmap sequential"
+                            : " · experimental Vulkan Qwen"));
 
                 int[] pixels = nativeGenerate(
                         model, diffusion, vae, clipL, t5, llm,
@@ -1159,7 +1215,7 @@ public class MainActivity extends Activity {
                         textCfg, distilledGuidance, finalSeed, useVaeTiling,
                         useLivePreview, previewInterval,
                         loraPaths, loraStrengths,
-                        textEncoderMode);
+                        textEncoderMode, cpuThreads);
                 if (pixels == null || pixels.length != width * height) {
                     throw new Exception("Native generator returned no image");
                 }
@@ -1478,10 +1534,14 @@ public class MainActivity extends Activity {
         ActivityManager.MemoryInfo sysMem = new ActivityManager.MemoryInfo();
         if (am != null) am.getMemoryInfo(sysMem);
 
+        ProcMemorySnapshot procMem = readProcMemorySnapshot();
         Debug.MemoryInfo processMem = new Debug.MemoryInfo();
         Debug.getMemoryInfo(processMem);
-        long pssBytes = Math.max(0L, (long) processMem.getTotalPss()) * 1024L;
-        long rssBytes = readProcRssBytes();
+        long pssBytes = procMem.pssBytes > 0
+                ? procMem.pssBytes
+                : Math.max(0L, (long) processMem.getTotalPss()) * 1024L;
+        long rssBytes = procMem.rssBytes;
+        long swapPssBytes = procMem.swapPssBytes;
         Runtime rt = Runtime.getRuntime();
         long javaHeap = Math.max(0L, rt.totalMemory() - rt.freeMemory());
         long nativeHeap = Math.max(0L, Debug.getNativeHeapAllocatedSize());
@@ -1506,10 +1566,12 @@ public class MainActivity extends Activity {
                 + " | " + cpuFreqText(cpuFreq);
         String memoryLine = "RAM PSS " + humanBytes(pssBytes)
                 + (rssBytes > 0 ? " · RSS " + humanBytes(rssBytes) : "")
+                + (swapPssBytes > 0 ? " · SwapPSS " + humanBytes(swapPssBytes) : "")
                 + " | available " + humanBytes(sysMem.availMem)
                 + " / " + humanBytes(sysMem.totalMem);
         String heapLine = "Heap Java " + humanBytes(javaHeap)
-                + " · native " + humanBytes(nativeHeap);
+                + " · native allocated " + humanBytes(nativeHeap)
+                + " (subset of process memory)";
         String gpuLine = "GPU " + gpuDevice
                 + " | load " + percentOrNA(gpuLoad)
                 + " | clock " + frequencyText(gpuFreq);
@@ -1652,14 +1714,38 @@ public class MainActivity extends Activity {
         return 0L;
     }
 
-    private long readProcRssBytes() {
-        try (BufferedReader reader = new BufferedReader(new FileReader("/proc/self/status"))) {
+    private ProcMemorySnapshot readProcMemorySnapshot() {
+        long rss = 0L;
+        long pss = 0L;
+        long swapPss = 0L;
+        try (BufferedReader reader = new BufferedReader(new FileReader("/proc/self/smaps_rollup"))) {
             String line;
             while ((line = reader.readLine()) != null) {
-                if (!line.startsWith("VmRSS:")) continue;
-                String[] p = line.trim().split("\\s+");
-                if (p.length >= 2) return Long.parseLong(p[1]) * 1024L;
+                if (line.startsWith("Rss:")) rss = parseProcKb(line);
+                else if (line.startsWith("Pss:")) pss = parseProcKb(line);
+                else if (line.startsWith("SwapPss:")) swapPss = parseProcKb(line);
             }
+        } catch (Throwable ignored) {}
+
+        if (rss <= 0) {
+            try (BufferedReader reader = new BufferedReader(new FileReader("/proc/self/status"))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (line.startsWith("VmRSS:")) {
+                        rss = parseProcKb(line);
+                        break;
+                    }
+                }
+            } catch (Throwable ignored) {}
+        }
+        return new ProcMemorySnapshot(rss, pss, swapPss);
+    }
+
+    private long parseProcKb(String line) {
+        if (line == null) return 0L;
+        try {
+            String[] p = line.trim().split("\\s+");
+            if (p.length >= 2) return Long.parseLong(p[1]) * 1024L;
         } catch (Throwable ignored) {}
         return 0L;
     }
@@ -1693,17 +1779,53 @@ public class MainActivity extends Activity {
 
     private int selectedTextEncoderMode() {
         if (textEncoderModeSpinner == null) {
-            return Math.max(0, Math.min(4, prefs.getInt("text_encoder_mode", 0)));
+            return Math.max(0, Math.min(10, prefs.getInt("text_encoder_mode", 0)));
         }
-        return Math.max(0, Math.min(4, textEncoderModeSpinner.getSelectedItemPosition()));
+        return Math.max(0, Math.min(10, textEncoderModeSpinner.getSelectedItemPosition()));
     }
 
     private String textEncoderModeLabel(int mode) {
-        if (mode == 4) return "CPU+disk 512";
-        if (mode == 3) return "Vulkan EXP 512";
-        if (mode == 2) return "CPU reference 512";
-        if (mode == 1) return "CPU balanced 128";
-        return "CPU sprint 64";
+        switch (mode) {
+            case 1: return "CPU raw tokens · 9/18/27";
+            case 2: return "CPU Ultra 24 · 6/12/18 EXP";
+            case 3: return "CPU Fast 32 · 9/18/27";
+            case 4: return "CPU Sprint 64 · 9/18/27";
+            case 5: return "CPU Balanced 128 · 9/18/27";
+            case 6: return "CPU Reference 512 · 9/18/27";
+            case 7: return "Vulkan 32 EXP";
+            case 8: return "Vulkan 64 EXP";
+            case 9: return "Vulkan 512 EXP";
+            case 10:return "CPU+disk 512";
+            default:return "CPU Fast 24 · 9/18/27";
+        }
+    }
+
+    private boolean isCpuTextEncoderMode(int mode) {
+        return mode >= 0 && mode <= 6 || mode == 10;
+    }
+
+    private int selectedCpuThreads() {
+        int position = cpuThreadSpinner == null
+                ? Math.max(0, Math.min(3, prefs.getInt("cpu_thread_mode", 0)))
+                : Math.max(0, Math.min(3, cpuThreadSpinner.getSelectedItemPosition()));
+        if (position == 1) return 6;
+        if (position == 2) return 4;
+        if (position == 3) return 0;
+        return 8;
+    }
+
+    private String cpuThreadsLabel(int threads) {
+        return threads <= 0 ? "threads auto" : threads + " threads";
+    }
+
+    private String qwenQuantHint() {
+        String name = prefs.getString("llm_name", "");
+        if (name == null) name = "";
+        String lower = name.toLowerCase(Locale.US);
+        if (lower.contains("q4_0") || lower.contains("q4-0")) return "Q4_0 · KleidiAI eligible";
+        if (lower.contains("q4_1") || lower.contains("q4-1")) return "Q4_1 · no KleidiAI kernel";
+        if (lower.contains("q4_k") || lower.contains("q4-k")) return "Q4_K · DOTPROD/I8MM";
+        return "";
     }
 
     private int[] selectedDimensions() {
@@ -1874,6 +1996,7 @@ public class MainActivity extends Activity {
 
         if (vaeTilingCheck != null) vaeTilingCheck.setEnabled(!active);
         if (textEncoderModeSpinner != null) textEncoderModeSpinner.setEnabled(!active);
+        if (cpuThreadSpinner != null) cpuThreadSpinner.setEnabled(!active);
         if (livePreviewCheck != null) livePreviewCheck.setEnabled(!active);
         if (previewIntervalSpinner != null) {
             previewIntervalSpinner.setEnabled(!active && livePreviewCheck != null && livePreviewCheck.isChecked());
