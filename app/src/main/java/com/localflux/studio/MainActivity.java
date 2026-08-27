@@ -158,6 +158,7 @@ public class MainActivity extends Activity {
         w.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
 
         setContentView(buildUi());
+        repairFlux2SlotAssignment(currentProfile());
         refreshModelRows();
         refreshGenerateEnabled();
         refreshFaceEnabled();
