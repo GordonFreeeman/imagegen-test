@@ -6,6 +6,8 @@
 #include <cmath>
 #include <cctype>
 #include <cstdint>
+#include <ctime>
+#include <deque>
 #include <limits>
 #include <mutex>
 #include <string>
@@ -21,6 +23,10 @@ std::mutex g_ctx_mutex;
 sd_ctx_t* g_ctx = nullptr;
 std::string g_ctx_key;
 std::once_flag g_log_once;
+std::mutex g_log_buffer_mutex;
+std::deque<std::string> g_log_buffer;
+constexpr size_t MAX_CONSOLE_LOG_LINES = 900;
+size_t g_dropped_log_lines = 0;
 
 enum ProgressPhase {
     PHASE_IDLE = 0,
@@ -127,6 +133,51 @@ void preview_cb(int step, int frame_count, sd_image_t* frames, bool, void*) {
     g_preview_version.fetch_add(1);
 }
 
+std::string native_log_timestamp() {
+    using namespace std::chrono;
+    const auto now = system_clock::now();
+    const auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
+    const std::time_t tt = system_clock::to_time_t(now);
+    std::tm tm{};
+    localtime_r(&tt, &tm);
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d.%03d",
+                  tm.tm_hour, tm.tm_min, tm.tm_sec, static_cast<int>(ms.count()));
+    return std::string(buf);
+}
+
+const char* log_level_name(enum sd_log_level_t level) {
+    switch (level) {
+        case SD_LOG_ERROR: return "E";
+        case SD_LOG_WARN: return "W";
+        case SD_LOG_DEBUG: return "D";
+        default: return "I";
+    }
+}
+
+void push_console_log(enum sd_log_level_t level, const char* text) {
+    if (!text || !*text) return;
+    std::string raw(text);
+    size_t start = 0;
+    while (start <= raw.size()) {
+        size_t end = raw.find('\n', start);
+        if (end == std::string::npos) end = raw.size();
+        std::string line = raw.substr(start, end - start);
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
+        if (!line.empty()) {
+            std::string formatted = native_log_timestamp() + " [NATIVE/" + log_level_name(level) + "] " + line;
+            std::lock_guard<std::mutex> lock(g_log_buffer_mutex);
+            while (g_log_buffer.size() >= MAX_CONSOLE_LOG_LINES) {
+                g_log_buffer.pop_front();
+                ++g_dropped_log_lines;
+            }
+            g_log_buffer.emplace_back(std::move(formatted));
+        }
+        if (end >= raw.size()) break;
+        start = end + 1;
+    }
+}
+
 void android_log_cb(enum sd_log_level_t level, const char* text, void*) {
     int prio = ANDROID_LOG_INFO;
     if (level == SD_LOG_ERROR) prio = ANDROID_LOG_ERROR;
@@ -155,6 +206,7 @@ void android_log_cb(enum sd_log_level_t level, const char* text, void*) {
         }
     }
 
+    push_console_log(level, text);
     __android_log_print(prio, TAG, "%s", text ? text : "");
 }
 
@@ -250,16 +302,20 @@ sd_ctx_t* ensure_context(
         p.flash_attn = false;
         p.diffusion_flash_attn = false;
 
-        __android_log_print(
-                ANDROID_LOG_INFO, TAG,
-                "Loading split-model context in mobile-safe mode "
-                "(diffusion=gpu, te/vae=cpu, params diffusion=cpu te=%s, max_vram=-1, stream_layers=1)",
-                extreme_ram_saver ? "disk" : "cpu");
+        const char* te_mode = extreme_ram_saver ? "disk" : "cpu";
+        char mode_line[256];
+        std::snprintf(mode_line, sizeof(mode_line),
+                      "Loading split-model context in mobile-safe mode "
+                      "(diffusion=gpu, te/vae=cpu, params diffusion=cpu te=%s, max_vram=-1, stream_layers=1)",
+                      te_mode);
+        push_console_log(SD_LOG_INFO, mode_line);
+        __android_log_print(ANDROID_LOG_INFO, TAG, "%s", mode_line);
     } else {
         // Preserve automatic placement for genuinely self-contained checkpoints.
         p.auto_fit = true;
         p.flash_attn = true;
         p.diffusion_flash_attn = true;
+        push_console_log(SD_LOG_INFO, "Loading full-checkpoint context (mmap + flash attention + auto-fit)");
         __android_log_print(ANDROID_LOG_INFO, TAG,
                             "Loading full-checkpoint context (mmap + flash attention + auto-fit)");
     }
@@ -477,6 +533,26 @@ Java_com_localflux_studio_MainActivity_nativeGenerate(
     free_sd_images(images, count);
     set_phase(PHASE_COMPLETE, steps, steps);
     return result;
+}
+
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_localflux_studio_MainActivity_nativeDrainLogs(JNIEnv* env, jclass) {
+    std::string joined;
+    {
+        std::lock_guard<std::mutex> lock(g_log_buffer_mutex);
+        if (g_dropped_log_lines > 0) {
+            joined += native_log_timestamp() + " [NATIVE/W] Console buffer dropped " +
+                      std::to_string(g_dropped_log_lines) + " older log lines\n";
+            g_dropped_log_lines = 0;
+        }
+        for (const auto& line : g_log_buffer) {
+            joined += line;
+            joined.push_back('\n');
+        }
+        g_log_buffer.clear();
+    }
+    return env->NewStringUTF(joined.c_str());
 }
 
 extern "C"
