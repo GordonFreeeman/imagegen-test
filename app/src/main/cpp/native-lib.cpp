@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <deque>
 #include <limits>
@@ -238,7 +239,7 @@ std::string make_key(
         const std::string& llm,
         int te_mode) {
     return model + "\n" + diffusion + "\n" + vae + "\n" + clipL + "\n" + t5 + "\n" + llm +
-           "\nmobile-safe-v4-te-mode-" + std::to_string(te_mode);
+           "\nmobile-safe-v5-te-mode-" + std::to_string(te_mode);
 }
 
 sd_ctx_t* ensure_context(
@@ -251,7 +252,20 @@ sd_ctx_t* ensure_context(
         const std::string& llm,
         int te_mode) {
 
-    te_mode = std::max(0, std::min(2, te_mode));
+    te_mode = std::max(0, std::min(4, te_mode));
+
+    // The pinned FLUX.2 Klein conditioner normally runs Qwen on a full 512-token
+    // padded sequence. LocalFlux patches the vendored conditioner so modes 0/1
+    // can do the expensive Qwen pass on 64/128 minimum tokens and zero-pad the
+    // resulting hidden states back to 512 before diffusion.
+    const char* klein_cond_mode = te_mode == 0 ? "0" : (te_mode == 1 ? "1" : "2");
+    setenv("LOCALFLUX_KLEIN_COND_MODE", klein_cond_mode, 1);
+
+    // Model files are mmap-backed. Sequential access is a safe Android/Linux
+    // read-ahead hint and reduces first-run page-fault stalls without pinning
+    // the entire multi-gigabyte stack in memory.
+    setenv("SD_MMAP_FLAGS", "sequential", 1);
+
     const std::string key = make_key(model, diffusion, vae, clipL, t5, llm, te_mode);
     std::lock_guard<std::mutex> lock(g_ctx_mutex);
 
@@ -286,21 +300,22 @@ sd_ctx_t* ensure_context(
     const bool split_model = !diffusion.empty();
     if (split_model) {
         // Mobile-safe policy for FLUX-class split stacks:
-        // - run the heavy diffusion graph on the first available GPU (Vulkan on Adreno)
-        // - run diffusion on Vulkan and, by default, run the dominant text encoder on Vulkan too
-        // - keep diffusion/text-encoder parameters CPU-backed so max-vram can segment/stage them
-        // - retain CPU and disk-backed TE fallbacks for compatibility / extreme RAM pressure
-        // - keep VAE on CPU and reserve ~1 GiB GPU headroom via graph-cut segmentation
+        // - diffusion stays on Vulkan with CPU-backed streamed parameters
+        // - Qwen defaults to optimized CPU because the current Adreno 830 path can crash
+        // - fast/balanced Klein modes reduce Qwen's pre-padding cost but keep the final
+        //   512-position conditioning tensor required by the diffusion pipeline
+        // - reference CPU, Vulkan and disk modes preserve the original 512-token path
+        //
         // Text encoder modes:
-        // 0 = optimized CPU runtime + CPU-resident params (default)
-        //     The APK is compiled for ARMv8.6 DOTPROD/I8MM, so Q4_K_M uses the
-        //     fast GGML ARM kernels instead of the baseline NEON path.
-        // 1 = Vulkan text encoder (experimental; some Adreno drivers crash)
-        // 2 = optimized CPU runtime + disk-backed params (minimum RAM, slowest)
-        if (te_mode == 1) {
+        // 0 = CPU + adaptive 64-token Klein minimum (recommended)
+        // 1 = CPU + adaptive 128-token Klein minimum (balanced)
+        // 2 = CPU + upstream full 512-token Klein conditioning (reference)
+        // 3 = Vulkan text encoder + full 512 tokens (experimental; may crash Adreno)
+        // 4 = CPU + disk-backed params + full 512 tokens (minimum RAM, very slow)
+        if (te_mode == 3) {
             p.backend = "diffusion=gpu,te=gpu,vae=cpu";
             p.params_backend = "diffusion=cpu,te=cpu,vae=cpu";
-        } else if (te_mode == 2) {
+        } else if (te_mode == 4) {
             p.backend = "diffusion=gpu,te=cpu,vae=cpu";
             p.params_backend = "diffusion=cpu,te=disk,vae=cpu";
         } else {
@@ -311,19 +326,22 @@ sd_ctx_t* ensure_context(
         p.stream_layers = true;
         p.auto_fit = false;
 
-        // Text-encoder flash attention is supported by the CPU backend and reduces
-        // Qwen attention work. Keep it disabled only for the experimental Vulkan TE path.
-        p.flash_attn = te_mode != 1;
+        // CPU Qwen keeps flash attention. Disable it only for the experimental
+        // Vulkan text-encoder path where the vendor driver was unstable.
+        p.flash_attn = te_mode != 3;
         p.diffusion_flash_attn = false;
 
-        const char* te_runtime = te_mode == 1 ? "gpu-experimental" : "cpu-armv8.6";
-        const char* te_params = te_mode == 2 ? "disk" : "cpu";
-        char mode_line[320];
+        const char* te_runtime = te_mode == 3 ? "gpu-experimental" : "cpu-armv8.6";
+        const char* te_params = te_mode == 4 ? "disk" : "cpu";
+        const char* cond_mode = te_mode == 0 ? "klein-qwen-min64"
+                              : te_mode == 1 ? "klein-qwen-min128"
+                              : "klein-qwen-full512";
+        char mode_line[384];
         std::snprintf(mode_line, sizeof(mode_line),
                       "Loading split-model context "
-                      "(diffusion=gpu, te=%s, vae=cpu, params diffusion=cpu te=%s, max_vram=-1, stream_layers=1; "
-                      "TE runner buffers released after conditioning)",
-                      te_runtime, te_params);
+                      "(diffusion=gpu, te=%s, vae=cpu, params diffusion=cpu te=%s, %s, mmap=sequential, "
+                      "max_vram=-1, stream_layers=1; TE runner buffers released after conditioning)",
+                      te_runtime, te_params, cond_mode);
         push_console_log(SD_LOG_INFO, mode_line);
         __android_log_print(ANDROID_LOG_INFO, TAG, "%s", mode_line);
     } else {
@@ -363,7 +381,7 @@ Java_com_localflux_studio_MainActivity_nativeSystemInfo(JNIEnv* env, jclass) {
     });
 
     std::string out = sd_get_system_info() ? sd_get_system_info() : "stable-diffusion.cpp";
-    out += "\nCPU target: ARMv8.6 + DOTPROD + I8MM; KleidiAI enabled for Q4_0/Q8_0";
+    out += "\nCPU target: ARMv8.6 + DOTPROD + I8MM; KleidiAI enabled for Q4_0/Q8_0";\n    out += "\nKlein conditioning: adaptive 64/128-token Qwen modes + upstream 512-token reference";
     const size_t n = sd_list_devices(nullptr, 0);
     if (n > 0) {
         std::vector<char> buf(n + 1, 0);
