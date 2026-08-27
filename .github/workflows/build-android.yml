@@ -39,6 +39,17 @@ jobs:
         with:
           gradle-version: "9.7.0"
 
+      - name: Prepare persistent sideload signing key
+        shell: bash
+        run: |
+          set -euxo pipefail
+          KEYSTORE="$RUNNER_TEMP/localflux-update.p12"
+          base64 -d ci/localflux-update.p12.b64 > "$KEYSTORE"
+          echo "LOCALFLUX_KEYSTORE=$KEYSTORE" >> "$GITHUB_ENV"
+          echo "LOCALFLUX_KEYSTORE_PASSWORD=localflux-update-2026" >> "$GITHUB_ENV"
+          echo "LOCALFLUX_KEY_ALIAS=localflux" >> "$GITHUB_ENV"
+          echo "LOCALFLUX_KEY_PASSWORD=localflux-update-2026" >> "$GITHUB_ENV"
+
       - name: Vendor pinned inference engines
         run: |
           chmod +x scripts/vendor-deps.sh
@@ -56,10 +67,14 @@ jobs:
           $ANDROID_HOME/build-tools/36.0.0/aapt dump badging "$APK" | tee /tmp/badging.txt
           grep -q "targetSdkVersion:'36'" /tmp/badging.txt
           grep -q "sdkVersion:'29'" /tmp/badging.txt
+          grep -q "versionCode='4'" /tmp/badging.txt
+          grep -q "versionName='1.2.0'" /tmp/badging.txt
           $ANDROID_HOME/build-tools/36.0.0/zipalign -c -P 16 -v 4 "$APK"
+          $ANDROID_HOME/build-tools/36.0.0/apksigner verify --print-certs "$APK" | tee /tmp/certs.txt
+          grep -qi "6c4c89639285c16e367171b085115e436459644714eb81d4c22fd6e2164e879c" /tmp/certs.txt
 
       - uses: actions/upload-artifact@v4
         with:
-          name: LocalFluxStudio-sdk36-debug
+          name: LocalFluxStudio-v1.2.0-sdk36
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
