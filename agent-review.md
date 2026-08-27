@@ -500,3 +500,138 @@ APK version: 1.2.2 (versionCode 6), targetSdk 36, minSdk 29.
 ## Final status
 
 Both reviewers approved application commit `d196ff59848b3618dd7e973e9c330ac0a90ee6c7`. The subsequent review-log commit only updates this document and does not alter the APK source/resources.
+
+
+# v1.3.0 Console / Telemetry Review
+
+Final reviewed application commit: `5b92697ae7050aeae8f2ae1b8ed3e3da4479ae5d`  
+Successful CI run: `33081163359`  
+APK version: 1.3.0 (versionCode 7), targetSdk 36, minSdk 29.
+
+## Iteration 1
+
+### Logic Inquisitor
+
+**Verdict:** REJECTED
+
+**Blocking findings:**
+
+1. Diagnostic sampling cadence was unnecessarily aggressive for an inference-heavy mobile app.
+   - Evidence: the initial telemetry implementation sampled PSS/RSS, CPU, sysfs counters, thermal state and native logs every second.
+   - Expected behavior: diagnostics must not materially compete with Qwen/FLUX inference.
+   - Required correction: move telemetry to a dedicated low-priority executor and reduce expensive metric collection to a two-second cadence.
+   - Severity: Medium
+
+2. Console exports could omit the most recent native messages.
+   - Evidence: native logs are buffered and normally drained by the periodic diagnostics poller. A user pressing Copy or Save between polls could export a console missing up to the latest poll interval.
+   - Expected behavior: Copy/Save must flush the current native log buffer immediately before exporting.
+   - Required correction: synchronously drain pending native logs before Copy and Save.
+   - Severity: Medium
+
+3. Generation telemetry did not immediately expose the last native engine message.
+   - Evidence: the first implementation showed only time since the last native event.
+   - Expected behavior: the Create screen should show the last native stable-diffusion.cpp message so a stuck Qwen/Vulkan stage can be diagnosed without switching tabs.
+   - Required correction: retain and display a safely truncated last native message.
+   - Severity: Medium
+
+**Verification performed:**
+- Inspected `native-lib.cpp` native log callback, bounded native log buffer, JNI drain path and Android Logcat forwarding.
+- Inspected Java diagnostics executor, polling cadence, CPU/memory/sysfs readers, console export flow and generation telemetry updates.
+- Verified GPU load is explicitly best-effort and returns N/A when Qualcomm KGSL counters are inaccessible rather than presenting a fabricated value.
+
+### Aesthetic Executioner
+
+**Verdict:** REJECTED
+
+**Blocking findings:**
+
+1. The first four-tab layout could push the new Console tab partially off-screen on common narrow portrait viewports.
+   - Evidence: initial fixed widths totaled more than the typical content width after the app's horizontal padding.
+   - Expected behavior: Console must be immediately discoverable without requiring the user to notice horizontal navigation scrolling.
+   - Required correction: reduce tab widths while retaining readable labels and touch targets.
+   - Severity: Medium
+
+**Non-blocking improvements:**
+- The full console is intentionally isolated in its own tab so Create remains focused; only a compact telemetry block is shown under generation progress.
+
+**Verification performed:**
+- Inspected the supplied running-app portrait screenshot for available content width and existing spacing.
+- Inspected the final tab widths, generation telemetry placement, Console card, action buttons and scroll behavior in source.
+- No Android emulator or physical device was available in CI, so no fabricated runtime screenshot was claimed.
+
+## Iteration 2 — Final
+
+### Logic Inquisitor
+
+**Verdict:** APPROVED
+
+**Blocking findings:**
+- None.
+
+**Non-blocking improvements:**
+- Adreno GPU utilization and frequency remain OEM/SELinux-dependent. The implementation correctly shows N/A when KGSL sysfs counters are inaccessible.
+- Android public APIs do not expose precise per-process GPU memory usage; the app therefore reports process PSS/RSS, Java/native heap, system RAM and best-effort GPU activity rather than inventing GPU-memory numbers.
+
+**Verification performed:**
+- Verified stable-diffusion.cpp logs are captured directly in a bounded thread-safe native buffer while still being forwarded to Android Logcat.
+- Verified JNI `nativeDrainLogs()` drains the native console buffer without exposing stale duplicate entries.
+- Verified Console tab includes:
+  - timestamped native and app logs,
+  - Copy,
+  - Clear,
+  - Save log to Downloads/LocalFluxStudio,
+  - Auto-scroll.
+- Verified Create telemetry includes:
+  - active generation configuration,
+  - current phase,
+  - app CPU estimate and core-equivalent usage,
+  - system CPU load,
+  - current CPU frequency where readable,
+  - process PSS/RSS,
+  - Java heap,
+  - native heap,
+  - available/total system RAM,
+  - Vulkan device name,
+  - best-effort Adreno GPU load/frequency,
+  - Android thermal status,
+  - battery temperature,
+  - age of last native log event,
+  - last native engine message.
+- Verified diagnostics run on a dedicated background executor at low thread priority and a two-second cadence.
+- Verified periodic metric snapshots are added to Console every 15 seconds during active generation.
+- Verified Copy and Save explicitly flush pending native logs first.
+- Verified generation phase and sampling-step changes are logged separately.
+- Verified v1.3.0 keeps the existing model/LoRA/generation/face-swap behavior unchanged outside diagnostics.
+- GitHub Actions run `33081163359` passed:
+  - `:app:testDebugUnitTest`
+  - `:app:lintDebug`
+  - `:app:assembleDebug`
+  - compileSdk 36
+  - targetSdk 36
+  - minSdk 29
+  - versionCode 7
+  - versionName 1.3.0
+  - 16 KB alignment verification
+  - persistent signer fingerprint verification
+
+### Aesthetic Executioner
+
+**Verdict:** APPROVED
+
+**Blocking findings:**
+- None.
+
+**Verification performed:**
+- Re-inspected the final four-tab navigation with reduced widths; Create, Models, Face swap and Console fit a typical portrait content width without hiding Console.
+- Re-inspected the Create screen to ensure the telemetry block remains compact relative to the existing progress/result hierarchy.
+- Re-inspected the Console tab's typography, monospaced log surface, fixed-height log viewport, button row and explanatory copy.
+- Confirmed all new content remains inside the existing vertical ScrollView and no fixed horizontal overflow path is introduced.
+- Inspected the supplied portrait screenshot as the visual baseline; no device/emulator renderer was available for a post-build screenshot.
+
+## Final status
+
+Both reviewers approved application commit `5b92697ae7050aeae8f2ae1b8ed3e3da4479ae5d`.
+
+CI run `33081163359` verified package `com.localflux.studio`, versionCode `7`, versionName `1.3.0`, targetSdk `36`, minSdk `29`, 16 KB alignment, and persistent signer SHA-256:
+
+`6c4c89639285c16e367171b085115e436459644714eb81d4c22fd6e2164e879c`
