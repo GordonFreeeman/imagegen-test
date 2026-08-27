@@ -63,7 +63,7 @@ public class MainActivity extends Activity {
             String model, String diffusion, String vae, String clipL, String t5, String llm,
             String prompt, String negative, int width, int height, int steps,
             float textCfg, float distilledGuidance, long seed, boolean vaeTiling,
-            boolean livePreview, int previewInterval);
+            boolean livePreview, int previewInterval, String[] loraPaths, float[] loraStrengths);
     private static native int[] nativeProgressSnapshot();
     private static native int[] nativePreviewSnapshot(int lastVersion);
     private static native void nativeCancel();
@@ -83,6 +83,8 @@ public class MainActivity extends Activity {
     private static final int REQ_MODEL = 1001;
     private static final int REQ_SOURCE = 1002;
     private static final int REQ_TARGET = 1003;
+    private static final int REQ_LORA_BASE = 1200;
+    private static final int MAX_LORAS = 4;
 
     private static final String[] MODEL_PROFILES = {
             "Auto / custom",
@@ -101,6 +103,10 @@ public class MainActivity extends Activity {
 
     private final LinkedHashMap<String, String> roleLabels = new LinkedHashMap<>();
     private final Map<String, TextView> roleValues = new LinkedHashMap<>();
+    private final Map<String, LinearLayout> roleRows = new LinkedHashMap<>();
+    private final TextView[] loraValues = new TextView[MAX_LORAS];
+    private final TextView[] loraStrengthValues = new TextView[MAX_LORAS];
+    private final SeekBar[] loraStrengthBars = new SeekBar[MAX_LORAS];
     private String pendingRole;
 
     private EditText promptInput;
@@ -196,6 +202,7 @@ public class MainActivity extends Activity {
         setContentView(buildUi());
         repairFlux2SlotAssignment(currentProfile());
         refreshModelRows();
+        refreshLoraRows();
         refreshGenerateEnabled();
         refreshFaceEnabled();
 
@@ -347,9 +354,79 @@ public class MainActivity extends Activity {
             value.setPadding(0, dp(3), dp(4), 0);
             value.setMaxLines(2);
             roleValues.put(role, value);
+            roleRows.put(role, row);
             row.addView(value);
             card.addView(row);
         }
+
+        TextView loraTitle = text("LORA ADAPTERS", 11, ACCENT_2, true);
+        loraTitle.setLetterSpacing(0.1f);
+        loraTitle.setPadding(0, dp(18), 0, dp(3));
+        card.addView(loraTitle);
+
+        TextView loraHint = text(
+                "Optional runtime LoRAs. The adapter must match the selected base architecture. Strength 1.0 is the LoRA's authored weight.",
+                11, MUTED, false);
+        loraHint.setPadding(0, 0, 0, dp(5));
+        card.addView(loraHint);
+
+        for (int i = 0; i < MAX_LORAS; i++) {
+            final int slot = i;
+            LinearLayout loraRow = column();
+            loraRow.setPadding(0, dp(7), 0, dp(8));
+
+            LinearLayout top = new LinearLayout(this);
+            top.setOrientation(LinearLayout.HORIZONTAL);
+            top.setGravity(Gravity.CENTER_VERTICAL);
+
+            TextView label = text("LoRA " + (i + 1), 14, TEXT, true);
+            top.addView(label, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+            Button importButton = secondaryButton("Import");
+            importButton.setOnClickListener(v -> chooseLora(slot));
+            top.addView(importButton, new LinearLayout.LayoutParams(dp(82), dp(42)));
+
+            Button clearButton = secondaryButton("Clear");
+            clearButton.setOnClickListener(v -> clearLora(slot));
+            LinearLayout.LayoutParams clearLp = new LinearLayout.LayoutParams(dp(76), dp(42));
+            clearLp.setMarginStart(dp(6));
+            top.addView(clearButton, clearLp);
+            loraRow.addView(top);
+
+            TextView value = text("Not selected", 12, MUTED, false);
+            value.setPadding(0, dp(3), 0, dp(2));
+            value.setMaxLines(2);
+            loraValues[i] = value;
+            loraRow.addView(value);
+
+            LinearLayout strengthLine = new LinearLayout(this);
+            strengthLine.setOrientation(LinearLayout.HORIZONTAL);
+            strengthLine.setGravity(Gravity.CENTER_VERTICAL);
+            TextView strengthLabel = text("Strength", 11, MUTED, true);
+            strengthLine.addView(strengthLabel, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+            TextView strengthValue = text("1.00", 12, ACCENT_2, true);
+            loraStrengthValues[i] = strengthValue;
+            strengthLine.addView(strengthValue);
+            loraRow.addView(strengthLine);
+
+            SeekBar strength = new SeekBar(this);
+            strength.setMax(200);
+            strength.setProgress(Math.round(prefs.getFloat("lora_" + i + "_strength", 1.0f) * 100f));
+            strength.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                    float value = progress / 100f;
+                    loraStrengthValues[slot].setText(String.format(Locale.US, "%.2f", value));
+                    if (fromUser) prefs.edit().putFloat("lora_" + slot + "_strength", value).apply();
+                }
+                @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+                @Override public void onStopTrackingTouch(SeekBar seekBar) {}
+            });
+            loraStrengthBars[i] = strength;
+            loraRow.addView(strength);
+
+            card.addView(loraRow);
+        }
+        refreshLoraRows();
 
         LinearLayout actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.HORIZONTAL);
@@ -680,6 +757,8 @@ public class MainActivity extends Activity {
 
         if (requestCode == REQ_MODEL && pendingRole != null) {
             importModel(pendingRole, uri);
+        } else if (requestCode >= REQ_LORA_BASE && requestCode < REQ_LORA_BASE + MAX_LORAS) {
+            importLora(requestCode - REQ_LORA_BASE, uri);
         } else if (requestCode == REQ_SOURCE || requestCode == REQ_TARGET) {
             loadImageForSwap(requestCode, uri);
         }
@@ -800,7 +879,8 @@ public class MainActivity extends Activity {
                         model, diffusion, prefPath("vae"), prefPath("clip_l"), prefPath("t5"), prefPath("llm"),
                         prompt, negativeInput.getText().toString(), width, height, steps,
                         textCfg, distilledGuidance, finalSeed, vaeTilingCheck.isChecked(),
-                        livePreviewCheck.isChecked(), selectedPreviewInterval());
+                        livePreviewCheck.isChecked(), selectedPreviewInterval(),
+                        loraPathsForGeneration(), loraStrengthsForGeneration());
                 if (pixels == null || pixels.length != width * height) {
                     throw new Exception("Native generator returned no image");
                 }
@@ -822,6 +902,143 @@ public class MainActivity extends Activity {
                 });
             }
         });
+    }
+
+    private void chooseLora(int slot) {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        startActivityForResult(i, REQ_LORA_BASE + slot);
+    }
+
+    private void importLora(int slot, Uri uri) {
+        if (slot < 0 || slot >= MAX_LORAS) return;
+        setBusy(true, "Importing LoRA " + (slot + 1) + "…");
+        worker.execute(() -> {
+            File partial = null;
+            try {
+                String display = displayName(uri);
+                File dir = new File(getFilesDir(), "loras");
+                if (!dir.exists() && !dir.mkdirs()) throw new Exception("Could not create LoRA directory");
+
+                String safe = display.replaceAll("[^A-Za-z0-9._-]", "_");
+                partial = new File(dir, "lora-" + slot + "-" + safe + ".partial");
+                try (InputStream in = getContentResolver().openInputStream(uri);
+                     OutputStream out = new FileOutputStream(partial)) {
+                    if (in == null) throw new Exception("Could not open selected LoRA");
+                    byte[] buffer = new byte[1024 * 1024];
+                    int n;
+                    while ((n = in.read(buffer)) >= 0) out.write(buffer, 0, n);
+                }
+
+                File finalFile = new File(dir, "lora-" + slot + "-" + safe);
+                String oldPath = prefs.getString("lora_" + slot + "_path", "");
+                if (finalFile.exists()) finalFile.delete();
+                if (!partial.renameTo(finalFile)) throw new Exception("Could not finalize LoRA import");
+
+                prefs.edit()
+                        .putString("lora_" + slot + "_path", finalFile.getAbsolutePath())
+                        .putString("lora_" + slot + "_name", display)
+                        .putLong("lora_" + slot + "_bytes", finalFile.length())
+                        .putFloat("lora_" + slot + "_strength", prefs.getFloat("lora_" + slot + "_strength", 1.0f))
+                        .apply();
+
+                if (oldPath != null && !oldPath.isEmpty() && !oldPath.equals(finalFile.getAbsolutePath())) {
+                    File old = new File(oldPath);
+                    File loraDir = new File(getFilesDir(), "loras");
+                    if (old.exists() && old.getParentFile() != null && old.getParentFile().equals(loraDir)) old.delete();
+                }
+
+                runOnUiThread(() -> {
+                    refreshLoraRows();
+                    setBusy(false, "LoRA imported. It will be applied at generation time.");
+                });
+            } catch (Exception e) {
+                if (partial != null) partial.delete();
+                runOnUiThread(() -> setBusy(false, "LoRA import failed: " + e.getMessage()));
+            }
+        });
+    }
+
+    private void clearLora(int slot) {
+        if (slot < 0 || slot >= MAX_LORAS) return;
+        String path = prefs.getString("lora_" + slot + "_path", "");
+        prefs.edit()
+                .remove("lora_" + slot + "_path")
+                .remove("lora_" + slot + "_name")
+                .remove("lora_" + slot + "_bytes")
+                .apply();
+        if (path != null && !path.isEmpty()) {
+            File file = new File(path);
+            File loraDir = new File(getFilesDir(), "loras");
+            if (file.exists() && file.getParentFile() != null && file.getParentFile().equals(loraDir)) file.delete();
+        }
+        refreshLoraRows();
+    }
+
+    private void refreshLoraRows() {
+        for (int i = 0; i < MAX_LORAS; i++) {
+            TextView value = loraValues[i];
+            SeekBar strength = loraStrengthBars[i];
+            TextView strengthValue = loraStrengthValues[i];
+            if (value == null) continue;
+
+            String path = prefs.getString("lora_" + i + "_path", "");
+            File file = path == null || path.isEmpty() ? null : new File(path);
+            if (file == null || !file.exists()) {
+                value.setText("Not selected");
+                value.setTextColor(MUTED);
+            } else {
+                String name = prefs.getString("lora_" + i + "_name", file.getName());
+                long bytes = prefs.getLong("lora_" + i + "_bytes", file.length());
+                value.setText(name + " · " + humanBytes(bytes));
+                value.setTextColor(ACCENT_2);
+            }
+
+            float multiplier = Math.max(0f, Math.min(2f, prefs.getFloat("lora_" + i + "_strength", 1.0f)));
+            if (strength != null) strength.setProgress(Math.round(multiplier * 100f));
+            if (strengthValue != null) strengthValue.setText(String.format(Locale.US, "%.2f", multiplier));
+        }
+    }
+
+    private String[] loraPathsForGeneration() {
+        String[] paths = new String[MAX_LORAS];
+        for (int i = 0; i < MAX_LORAS; i++) {
+            String path = prefs.getString("lora_" + i + "_path", "");
+            paths[i] = path != null && !path.isEmpty() && new File(path).exists() ? path : "";
+        }
+        return paths;
+    }
+
+    private float[] loraStrengthsForGeneration() {
+        float[] strengths = new float[MAX_LORAS];
+        for (int i = 0; i < MAX_LORAS; i++) {
+            strengths[i] = Math.max(0f, Math.min(2f, prefs.getFloat("lora_" + i + "_strength", 1.0f)));
+        }
+        return strengths;
+    }
+
+    private void updateModelSlotVisibility(int profile) {
+        boolean flux2 = isFlux2Profile(profile);
+        boolean flux1 = profile == 6 || profile == 7;
+
+        setRoleVisible("model", !flux2 && !flux1);
+        setRoleVisible("diffusion", true);
+        setRoleVisible("vae", true);
+        setRoleVisible("clip_l", !flux2);
+        setRoleVisible("t5", !flux2);
+        setRoleVisible("llm", !flux1);
+
+        if (flux2) {
+            setRoleVisible("clip_l", false);
+            setRoleVisible("t5", false);
+            setRoleVisible("model", false);
+        }
+    }
+
+    private void setRoleVisible(String role, boolean visible) {
+        LinearLayout row = roleRows.get(role);
+        if (row != null) row.setVisibility(visible ? View.VISIBLE : View.GONE);
     }
 
     private int[] selectedDimensions() {
@@ -890,21 +1107,41 @@ public class MainActivity extends Activity {
         String elapsedText = " · " + formatElapsed(elapsed);
         switch (phase) {
             case 1:
-                progress.setIndeterminate(true);
-                progressTitle.setText("Loading model stack" + elapsedText);
+                if (steps > 0) {
+                    progress.setIndeterminate(false);
+                    progress.setMax(Math.max(1, steps));
+                    progress.setProgress(Math.max(0, Math.min(step, steps)));
+                    progressTitle.setText("Loading model tensors · " + step + " / " + steps + elapsedText);
+                } else {
+                    progress.setIndeterminate(true);
+                    progressTitle.setText("Loading model stack" + elapsedText);
+                }
                 status.setText("Loading weights and preparing backends" + stall);
                 break;
             case 2:
-                progress.setIndeterminate(true);
-                progressTitle.setText("Encoding prompt / preparing latents" + elapsedText);
-                status.setText("Text encoder and conditioning are running" + stall);
+                if (steps > 0) {
+                    progress.setIndeterminate(false);
+                    progress.setMax(Math.max(1, steps));
+                    progress.setProgress(Math.max(0, Math.min(step, steps)));
+                    progressTitle.setText("Loading lazy tensors / adapters · " + step + " / " + steps + elapsedText);
+                    status.setText("Loading disk-backed text/LoRA tensors before sampling" + stall);
+                } else {
+                    progress.setIndeterminate(true);
+                    progressTitle.setText("Encoding prompt / preparing latents" + elapsedText);
+                    status.setText("Text encoder, LoRA application and conditioning are running" + stall);
+                }
                 break;
             case 3:
                 progress.setIndeterminate(false);
                 progress.setMax(Math.max(1, steps));
                 progress.setProgress(Math.max(0, Math.min(step, Math.max(1, steps))));
-                progressTitle.setText("Sampling · step " + Math.max(0, step) + " / " + Math.max(1, steps) + elapsedText);
-                status.setText("Diffusion sampling on the configured backend" + stall);
+                if (steps > 0 && step >= steps) {
+                    progressTitle.setText("Sampling complete · preparing decode" + elapsedText);
+                    status.setText("Denoising finished; waiting for the actual VAE decode phase" + stall);
+                } else {
+                    progressTitle.setText("Sampling · step " + Math.max(0, step) + " / " + Math.max(1, steps) + elapsedText);
+                    status.setText("Diffusion sampling on the configured backend" + stall);
+                }
                 break;
             case 4:
                 progress.setIndeterminate(true);
@@ -1234,6 +1471,7 @@ public class MainActivity extends Activity {
         if (profileInfo != null) profileInfo.setText(profileDescription(p));
 
         repairFlux2SlotAssignment(p);
+        updateModelSlotVisibility(p);
 
         int steps = 20;
         float cfg = 7.0f;
@@ -1271,7 +1509,7 @@ public class MainActivity extends Activity {
     private String profileDescription(int p) {
         switch (p) {
             case 1:
-                return "BEST PHONE FIT · FLUX.2 Klein 4B\nImport the Klein GGUF under Diffusion / transformer, plus FLUX.2 VAE/AE and Qwen3 4B under LLM. The app uses mobile-safe streamed Vulkan residency and starts at 512².";
+                return "BEST PHONE FIT · FLUX.2 Klein 4B\nNeeds only Diffusion / transformer + FLUX.2 VAE/AE + Qwen3 4B LLM. CLIP-L, T5XXL and Full checkpoint are hidden because this profile does not use them. Optional compatible LoRAs can be layered below.";
             case 2:
                 return "QUALITY PHONE PROFILE · FLUX.2 Klein Base 4B\nSame files as Klein 4B, but the base model is intended for a fuller ~20-step sampling run and higher CFG.";
             case 3:
