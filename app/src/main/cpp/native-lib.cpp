@@ -97,11 +97,17 @@ void progress_cb(int step, int steps, float, void*) {
     const int safe_step = std::max(0, std::min(step, safe_steps > 0 ? safe_steps : step));
     const int expected = g_expected_sample_steps.load();
 
-    if (g_sampling_started.load() && expected > 0 && safe_steps == expected) {
-        set_phase(PHASE_SAMPLING, safe_step, safe_steps);
+    if (g_sampling_started.load()) {
+        if (expected > 0 && safe_steps == expected) {
+            set_phase(PHASE_SAMPLING, safe_step, safe_steps);
+        } else {
+            // Once stable-diffusion.cpp has emitted "generating image:", later
+            // tensor-loading callbacks belong to diffusion staging, not Qwen.
+            // Do not regress the UI back to "conditioning" while FLUX is active.
+            set_phase(PHASE_SAMPLING, g_step.load(), expected);
+        }
     } else {
-        // Runtime LoRA / lazily disk-backed model tensors can also report byte/tensor progress
-        // during generate_image(). Keep those distinct from the requested sampling steps.
+        // Before sampling starts, callbacks are model/Qwen/LoRA preparation.
         set_phase(PHASE_CONDITIONING, safe_step, safe_steps);
     }
 }
