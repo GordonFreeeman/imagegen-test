@@ -691,57 +691,60 @@ public class MainActivity extends Activity {
 
         card.addView(fieldLabel("Qwen conditioning strategy"));
         textEncoderModeSpinner = styledSpinner(new String[]{
-                "CPU Fast · min 24 · states 9/18/27 · recommended Q4_0",
+                "CPU Fast · min 24 · states 9/18/27 · Q4_0",
                 "CPU Raw · real prompt tokens · states 9/18/27",
                 "CPU Ultra · min 24 · early states 6/12/18 · EXP",
                 "CPU Fast · min 32 · states 9/18/27",
                 "CPU Sprint · min 64 · states 9/18/27",
                 "CPU Balanced · min 128 · states 9/18/27",
                 "CPU Reference · full 512 · states 9/18/27",
-                "Vulkan Qwen · min 32 · EXP",
-                "Vulkan Qwen · min 64 · EXP",
-                "Vulkan Qwen · full 512 · EXP",
-                "CPU + disk · full 512 · emergency"
+                "Vulkan Safe · min 24 · 0.90 GiB streamed · recommended",
+                "Vulkan Balanced · min 32 · 1.25 GiB streamed",
+                "Vulkan Reference · full 512 · 1.25 GiB streamed",
+                "CPU + disk · full 512 · emergency",
+                "Vulkan Legacy · min 32 · AUTO VRAM · diagnostic"
         });
 
-        // v1.3.4 expands the conditioning strategy schema. Upgrading the old
-        // default Sprint-64 selection moves to Fast-24 so install-over updates
-        // actually receive the speed fix; explicit conservative modes remain
-        // available and are migrated to their closest equivalent.
+        // v1.3.5 replaces Android's misleading Vulkan auto-VRAM budget with
+        // explicit mobile graph budgets. Existing Vulkan selections migrate to
+        // the bounded Safe profile; CPU selections retain their intent.
         int savedTeMode;
         int teSchema = prefs.getInt("text_encoder_mode_schema", 0);
-        if (teSchema < 4) {
+        if (teSchema < 5) {
             int oldMode = prefs.contains("text_encoder_mode")
                     ? Math.max(0, prefs.getInt("text_encoder_mode", 0))
                     : 0;
-            if (teSchema >= 3) {
+            if (teSchema >= 4) {
+                if (oldMode >= 7 && oldMode <= 9) savedTeMode = 7;
+                else savedTeMode = Math.max(0, Math.min(10, oldMode));
+            } else if (teSchema >= 3) {
                 if (oldMode == 1) savedTeMode = 5;
                 else if (oldMode == 2) savedTeMode = 6;
-                else if (oldMode == 3) savedTeMode = 9;
+                else if (oldMode == 3) savedTeMode = 7;
                 else if (oldMode == 4) savedTeMode = 10;
                 else savedTeMode = 0;
             } else if (teSchema == 2) {
                 // v1.3.2: 0=optimized CPU, 1=Vulkan, 2=disk.
-                savedTeMode = oldMode == 1 ? 9 : (oldMode == 2 ? 10 : 0);
+                savedTeMode = oldMode == 1 ? 7 : (oldMode == 2 ? 10 : 0);
             } else {
                 // v1.3.1 and older: 0=Vulkan, 1=CPU, 2=disk.
-                savedTeMode = oldMode == 0 ? 9 : (oldMode == 2 ? 10 : 0);
+                savedTeMode = oldMode == 0 ? 7 : (oldMode == 2 ? 10 : 0);
             }
             prefs.edit()
                     .putInt("text_encoder_mode", savedTeMode)
-                    .putInt("text_encoder_mode_schema", 4)
+                    .putInt("text_encoder_mode_schema", 5)
                     .remove("extreme_ram_saver")
                     .apply();
         } else {
-            savedTeMode = Math.max(0, Math.min(10, prefs.getInt("text_encoder_mode", 0)));
+            savedTeMode = Math.max(0, Math.min(11, prefs.getInt("text_encoder_mode", 0)));
         }
 
         textEncoderModeSpinner.setSelection(savedTeMode);
         textEncoderModeSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
                 prefs.edit()
-                        .putInt("text_encoder_mode", Math.max(0, Math.min(10, position)))
-                        .putInt("text_encoder_mode_schema", 4)
+                        .putInt("text_encoder_mode", Math.max(0, Math.min(11, position)))
+                        .putInt("text_encoder_mode_schema", 5)
                         .apply();
             }
             @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
@@ -768,7 +771,7 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(52)));
 
         TextView ramHint = text(
-                "For Qwen3 4B CPU conditioning, Q4_0 is the preferred benchmark in this build because KleidiAI has direct Q4_0/Q8_0 kernels. Q4_K_M uses the ARMv8.6 DOTPROD/I8MM GGML path; q4_1 tensors are not KleidiAI-accelerated. Fast/Raw modes compute far fewer Qwen tokens and zero-pad embeddings to 512 afterwards. Ultra also stops at states 6/12/18 and may reduce prompt quality. Short Vulkan modes use much smaller graphs than the old full-512 Vulkan experiment but can still crash current Adreno drivers.",
+                "Vulkan Safe is the primary FLUX.2 Klein path on 16 GB Adreno devices: it runs a short Qwen graph, caps graph residency at 0.90 GiB, streams layers, enables diffusion flash attention, and uses bounded Vulkan allocations. Balanced raises the graph budget to 1.25 GiB. Legacy preserves the old auto-VRAM behavior only for diagnosis. CPU Q4_0 can use KleidiAI but remains a slower fallback; Q4_K_M uses ARM DOTPROD/I8MM.",
                 11, MUTED, false);
         ramHint.setPadding(dp(2), dp(4), dp(2), dp(5));
         card.addView(ramHint);
@@ -819,7 +822,7 @@ public class MainActivity extends Activity {
         progress.setVisibility(View.GONE);
         card.addView(progress, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(10)));
 
-        status = text("Ready. For Qwen3 4B Q4_0, start with CPU Fast min-24 + 8 threads at 512².", 12, MUTED, false);
+        status = text("Ready. Start FLUX.2 Klein with Vulkan Safe min-24 at 512²; use CPU Fast only as a compatibility fallback.", 12, MUTED, false);
         status.setGravity(Gravity.CENTER_HORIZONTAL);
         status.setPadding(dp(5), dp(9), dp(5), dp(10));
         card.addView(status);
@@ -1781,9 +1784,9 @@ public class MainActivity extends Activity {
 
     private int selectedTextEncoderMode() {
         if (textEncoderModeSpinner == null) {
-            return Math.max(0, Math.min(10, prefs.getInt("text_encoder_mode", 0)));
+            return Math.max(0, Math.min(11, prefs.getInt("text_encoder_mode", 0)));
         }
-        return Math.max(0, Math.min(10, textEncoderModeSpinner.getSelectedItemPosition()));
+        return Math.max(0, Math.min(11, textEncoderModeSpinner.getSelectedItemPosition()));
     }
 
     private String textEncoderModeLabel(int mode) {
@@ -1794,11 +1797,12 @@ public class MainActivity extends Activity {
             case 4: return "CPU Sprint 64 · 9/18/27";
             case 5: return "CPU Balanced 128 · 9/18/27";
             case 6: return "CPU Reference 512 · 9/18/27";
-            case 7: return "Vulkan 32 EXP";
-            case 8: return "Vulkan 64 EXP";
-            case 9: return "Vulkan 512 EXP";
-            case 10:return "CPU+disk 512";
-            default:return "CPU Fast 24 · 9/18/27";
+            case 7: return "Vulkan Safe 24 · 0.90 GiB";
+            case 8: return "Vulkan Balanced 32 · 1.25 GiB";
+            case 9: return "Vulkan Reference 512 · 1.25 GiB";
+            case 10:return "CPU+disk 512 · 1.00 GiB";
+            case 11:return "Vulkan Legacy 32 · auto VRAM";
+            default:return "CPU Fast 24 · 1.25 GiB";
         }
     }
 
