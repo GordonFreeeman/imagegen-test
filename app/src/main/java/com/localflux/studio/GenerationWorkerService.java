@@ -48,6 +48,7 @@ public class GenerationWorkerService extends Service {
     public static final String K_VAE_TILING = "vae_tiling";
     public static final String K_LORA_PATHS = "lora_paths";
     public static final String K_LORA_STRENGTHS = "lora_strengths";
+    public static final String K_RUNTIME_MODE = "runtime_mode";
     public static final String K_QWEN_MODE = "qwen_mode";
     public static final String K_THREADS = "threads";
     public static final String K_RESULT_PATH = "result_path";
@@ -149,6 +150,7 @@ public class GenerationWorkerService extends Service {
                         args.getBoolean(K_VAE_TILING, true),
                         args.getStringArray(K_LORA_PATHS),
                         args.getFloatArray(K_LORA_STRENGTHS),
+                        args.getInt(K_RUNTIME_MODE, 0),
                         args.getInt(K_QWEN_MODE, 1),
                         args.getInt(K_THREADS, 8));
 
