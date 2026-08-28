@@ -1196,6 +1196,142 @@ public class MainActivity extends Activity {
         });
     }
 
+    private boolean useAdrenoWorkerForProfile(int profile) {
+        // The Duration-AI runtime is intentionally narrow and validated for
+        // FLUX.2 Klein. Generic/Z-Image/FLUX.1 remain on the pinned upstream
+        // engine so existing model compatibility is not sacrificed.
+        return profile == 1 || profile == 2;
+    }
+
+    private int adrenoWorkerQwenMode(int textEncoderMode) {
+        return isCpuTextEncoderMode(textEncoderMode) ? 0 : 1;
+    }
+
+    private void startDiffusionWorker(Bundle request) {
+        pendingDiffusionRequest = request;
+        diffusionWorkerExpected = true;
+        diffusionWorkerCancelRequested = false;
+        usingAdrenoWorker = true;
+
+        Intent intent = new Intent(this, GenerationWorkerService.class);
+        boolean ok = bindService(
+                intent,
+                diffusionWorkerConnection,
+                Context.BIND_AUTO_CREATE | Context.BIND_IMPORTANT);
+        if (!ok) {
+            pendingDiffusionRequest = null;
+            handleDiffusionWorkerFailure("Android could not bind the Adreno diffusion worker.");
+        }
+    }
+
+    private void sendDiffusionWorkerCancel() {
+        Messenger worker = diffusionWorker;
+        if (worker == null) {
+            handleDiffusionWorkerFailure("Diffusion worker is no longer connected.");
+            return;
+        }
+        Message msg = Message.obtain(null, GenerationWorkerService.MSG_CANCEL);
+        msg.replyTo = diffusionWorkerReply;
+        try {
+            worker.send(msg);
+        } catch (RemoteException e) {
+            handleDiffusionWorkerFailure("Could not cancel diffusion worker: " + safeMessage(e));
+        }
+    }
+
+    private boolean handleDiffusionWorkerMessage(Message msg) {
+        Bundle data = msg.getData();
+        if (data == null) data = Bundle.EMPTY;
+
+        if (msg.what == GenerationWorkerService.MSG_PROGRESS) {
+            int[] snapshot = new int[]{
+                    data.getInt(GenerationWorkerService.K_PHASE, 0),
+                    data.getInt(GenerationWorkerService.K_STEP, 0),
+                    data.getInt(GenerationWorkerService.K_TOTAL, 0),
+                    data.getInt(GenerationWorkerService.K_ELAPSED, 0),
+                    0,
+                    0
+            };
+            renderProgressSnapshot(snapshot);
+            return true;
+        }
+
+        if (msg.what == GenerationWorkerService.MSG_LOG) {
+            String log = data.getString(GenerationWorkerService.K_LOG, "");
+            if (!log.isEmpty()) {
+                lastNativeEventUptimeMs = SystemClock.elapsedRealtime();
+                String[] lines = log.replace("\r", "").split("\n");
+                for (int i = lines.length - 1; i >= 0; --i) {
+                    if (!lines[i].trim().isEmpty()) {
+                        lastNativeLine = lines[i].trim();
+                        break;
+                    }
+                }
+                appendConsoleRaw(log);
+            }
+            return true;
+        }
+
+        if (msg.what == GenerationWorkerService.MSG_RESULT) {
+            String path = data.getString(GenerationWorkerService.K_RESULT_PATH, "");
+            Bitmap bitmap = path.isEmpty() ? null : BitmapFactory.decodeFile(path);
+            if (!path.isEmpty()) {
+                try { new File(path).delete(); } catch (Throwable ignored) {}
+            }
+            if (bitmap == null) {
+                handleDiffusionWorkerFailure("The Adreno worker completed but its PNG result could not be decoded.");
+                return true;
+            }
+
+            currentBitmap = bitmap;
+            resultImage.setImageBitmap(bitmap);
+            saveButton.setEnabled(true);
+            prefs.edit().putBoolean("generation_in_progress", false).apply();
+            status.setTextColor(MUTED);
+            status.setText("Done · Adreno-safe FLUX worker completed without taking down the UI process.");
+            appendConsole("WORKER", "Adreno-safe FLUX generation completed.");
+            finishDiffusionWorker(null, true);
+            return true;
+        }
+
+        if (msg.what == GenerationWorkerService.MSG_ERROR) {
+            String error = data.getString(GenerationWorkerService.K_ERROR, "Unknown worker error");
+            handleDiffusionWorkerFailure(error);
+            return true;
+        }
+
+        return true;
+    }
+
+    private void handleDiffusionWorkerFailure(String message) {
+        prefs.edit().putBoolean("generation_in_progress", false).apply();
+        status.setTextColor(DANGER);
+        status.setText("Generation failed in isolated worker: " + message);
+        appendConsole("WORKER-ERROR", message);
+        finishDiffusionWorker(null, false);
+    }
+
+    private void finishDiffusionWorker(String statusMessage, boolean success) {
+        diffusionWorkerExpected = false;
+        diffusionWorkerCancelRequested = false;
+        pendingDiffusionRequest = null;
+
+        if (diffusionWorkerBound) {
+            try { unbindService(diffusionWorkerConnection); } catch (Throwable ignored) {}
+        }
+        diffusionWorkerBound = false;
+        diffusionWorker = null;
+        usingAdrenoWorker = false;
+
+        if (statusMessage != null && !statusMessage.isEmpty()) {
+            status.setText(statusMessage);
+        }
+        if (!success && statusMessage != null && statusMessage.toLowerCase(Locale.US).contains("cancel")) {
+            status.setTextColor(MUTED);
+        }
+        setGenerating(false);
+    }
+
     private void startGeneration() {
         int profile = currentProfile();
         boolean flux2 = isFlux2Profile(profile);
