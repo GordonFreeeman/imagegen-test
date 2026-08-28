@@ -149,6 +149,7 @@ public class MainActivity extends Activity {
     private CheckBox livePreviewCheck;
     private Spinner previewIntervalSpinner;
     private Spinner textEncoderModeSpinner;
+    private Spinner fluxRuntimeSpinner;
     private Spinner cpuThreadSpinner;
     private Button generateButton;
     private Button cancelButton;
@@ -824,6 +825,32 @@ public class MainActivity extends Activity {
         });
         card.addView(textEncoderModeSpinner, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(52)));
+
+        card.addView(fieldLabel("FLUX.2 Android execution backend"));
+        fluxRuntimeSpinner = styledSpinner(new String[]{
+                "Adreno Watchdog Vulkan · auto-tuned · recommended",
+                "Adreno Vulkan Ultra-safe · 1 GFLOP submits · slower",
+                "CPU DiT fallback · confirmed working · very slow"
+        });
+        int savedFluxRuntime = Math.max(0, Math.min(2, prefs.getInt("flux_runtime_mode", 0)));
+        fluxRuntimeSpinner.setSelection(savedFluxRuntime);
+        fluxRuntimeSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
+                prefs.edit().putInt("flux_runtime_mode", Math.max(0, Math.min(2, position))).apply();
+            }
+            @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
+        });
+        card.addView(fluxRuntimeSpinner, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(52)));
+
+        TextView runtimeHint = text(
+                "Klein 4B uses a separate crash-isolated process with Duration AI's Adreno 830 watchdog fixes. "
+                + "Auto-tuned uses the validated q1 path when a q1_0 Bonsai DiT is selected, and a more conservative "
+                + "2-GFLOP / split-16 policy for Q4. Ultra-safe cuts submissions to 1 GFLOP. CPU DiT is the slow, "
+                + "driver-independent fallback.",
+                11, MUTED, false);
+        runtimeHint.setPadding(dp(2), dp(4), dp(2), dp(8));
+        card.addView(runtimeHint);
 
         card.addView(fieldLabel("Qwen CPU threads"));
         cpuThreadSpinner = styledSpinner(new String[]{
@@ -2065,6 +2092,18 @@ public class MainActivity extends Activity {
         return mode >= 0 && mode <= 6 || mode == 10;
     }
 
+    private int selectedFluxRuntimeMode() {
+        return fluxRuntimeSpinner == null
+                ? Math.max(0, Math.min(2, prefs.getInt("flux_runtime_mode", 0)))
+                : Math.max(0, Math.min(2, fluxRuntimeSpinner.getSelectedItemPosition()));
+    }
+
+    private String fluxRuntimeModeLabel(int mode) {
+        if (mode == 1) return "Adreno Ultra-safe Vulkan";
+        if (mode == 2) return "CPU DiT fallback";
+        return "Adreno Watchdog Vulkan";
+    }
+
     private int selectedCpuThreads() {
         int position = cpuThreadSpinner == null
                 ? Math.max(0, Math.min(3, prefs.getInt("cpu_thread_mode", 0)))
@@ -2253,6 +2292,7 @@ public class MainActivity extends Activity {
 
         if (vaeTilingCheck != null) vaeTilingCheck.setEnabled(!active);
         if (textEncoderModeSpinner != null) textEncoderModeSpinner.setEnabled(!active);
+        if (fluxRuntimeSpinner != null) fluxRuntimeSpinner.setEnabled(!active);
         if (cpuThreadSpinner != null) cpuThreadSpinner.setEnabled(!active);
         if (livePreviewCheck != null) livePreviewCheck.setEnabled(!active);
         if (previewIntervalSpinner != null) {
