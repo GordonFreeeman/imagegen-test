@@ -129,13 +129,26 @@ void reset_progress(int steps) {
     g_sampling_finished.store(false);
 }
 
-void configure_adreno_environment(bool q1_model) {
+void configure_adreno_environment(bool q1_model, int runtime_mode) {
     // These are taken from the Duration AI Galaxy S25+ / Adreno 830 validation
     // branch. The central fix is watchdog-aware command submission: no single
     // Vulkan command buffer should monopolize KGSL for ~2 seconds.
-    setenv("GGML_VK_GFLOPS_PER_SUBMIT", "4", 1);
-    setenv("GGML_VK_NODES_PER_SUBMIT", "24", 1);
-    setenv("GGML_VK_SPLIT_BIG", "8", 1);
+    if (runtime_mode == 1) {
+        setenv("GGML_VK_GFLOPS_PER_SUBMIT", "1", 1);
+        setenv("GGML_VK_NODES_PER_SUBMIT", "8", 1);
+        setenv("GGML_VK_SPLIT_BIG", "16", 1);
+    } else if (q1_model) {
+        setenv("GGML_VK_GFLOPS_PER_SUBMIT", "5", 1);
+        setenv("GGML_VK_NODES_PER_SUBMIT", "32", 1);
+        setenv("GGML_VK_SPLIT_BIG", "4", 1);
+    } else {
+        // Q4_K/Q4_0 carries more work per block than the validated q1_0 model.
+        // Use a deliberately smaller submit budget until device telemetry proves
+        // the specific phone can tolerate a more aggressive value.
+        setenv("GGML_VK_GFLOPS_PER_SUBMIT", "2", 1);
+        setenv("GGML_VK_NODES_PER_SUBMIT", "16", 1);
+        setenv("GGML_VK_SPLIT_BIG", "16", 1);
+    }
     setenv("GGML_VK_CONT_INPUT", "1", 1);
     setenv("GGML_VK_DISABLE_FUSION", "rms_norm_mul", 1);
     setenv("GGML_VK_FA_TUNE", "4,8,0,0", 1);
@@ -168,10 +181,12 @@ bool is_q1_model(const std::string& path) {
 std::string make_key(const std::string& diffusion,
                      const std::string& vae,
                      const std::string& llm,
+                     int runtime_mode,
                      int qwen_mode,
                      int threads) {
     return diffusion + "\n" + vae + "\n" + llm +
-           "\nadreno-watchdog-v1\nqwen-" + std::to_string(qwen_mode) +
+           "\nadreno-watchdog-v2\nruntime-" + std::to_string(runtime_mode) +
+           "\nqwen-" + std::to_string(qwen_mode) +
            "\nthreads-" + std::to_string(threads);
 }
 
@@ -179,6 +194,7 @@ sd_ctx_t* ensure_context(JNIEnv* env,
                          const std::string& diffusion,
                          const std::string& vae,
                          const std::string& llm,
+                         int runtime_mode,
                          int qwen_mode,
                          int requested_threads) {
     if (diffusion.empty() || vae.empty() || llm.empty()) {
@@ -193,10 +209,10 @@ sd_ctx_t* ensure_context(JNIEnv* env,
             : std::max(2, std::min(8, detected));
 
     const bool q1 = is_q1_model(diffusion);
-    configure_adreno_environment(q1);
+    configure_adreno_environment(q1, runtime_mode);
     setenv("LOCALFLUX_KLEIN_MIN_TOKENS", "24", 1);
 
-    const std::string key = make_key(diffusion, vae, llm, qwen_mode, threads);
+    const std::string key = make_key(diffusion, vae, llm, runtime_mode, qwen_mode, threads);
     if (g_ctx && g_ctx_key == key) return g_ctx;
 
     if (g_ctx) {
@@ -221,9 +237,15 @@ sd_ctx_t* ensure_context(JNIEnv* env,
     // The validated Duration-AI layout keeps parameters in host RAM/mmap and
     // executes the DiT on Vulkan. Qwen can stay on Vulkan for the fast 24-token
     // path, with CPU available as the compatibility option.
-    p.backend = qwen_mode == 0
-            ? "te=cpu,vae=cpu,diffusion=vulkan0"
-            : "te=vulkan0,vae=cpu,diffusion=vulkan0";
+    if (runtime_mode == 2) {
+        p.backend = qwen_mode == 0
+                ? "te=cpu,vae=cpu,diffusion=cpu"
+                : "te=vulkan0,vae=cpu,diffusion=cpu";
+    } else {
+        p.backend = qwen_mode == 0
+                ? "te=cpu,vae=cpu,diffusion=vulkan0"
+                : "te=vulkan0,vae=cpu,diffusion=vulkan0";
+    }
     p.params_backend = "te=cpu,vae=cpu,diffusion=cpu";
 
     // Do not graph-cut this fork. Its proven Adreno strategy instead bounds
@@ -236,10 +258,18 @@ sd_ctx_t* ensure_context(JNIEnv* env,
     // Duration's validated Adreno path keeps numerically sensitive tensors f32.
     p.tensor_type_rules = "norm=f32,_in.=f32,modulation=f32,final_layer=f32";
 
-    push_log(SD_LOG_INFO,
-             q1
-                 ? "Creating Duration-AI Adreno runtime: Bonsai q1 direct + watchdog-bounded Vulkan"
-                 : "Creating Duration-AI Adreno runtime: watchdog-bounded Vulkan + split projections");
+    if (runtime_mode == 2) {
+        push_log(SD_LOG_INFO,
+                 "Creating Duration-AI CPU-DiT fallback: Vulkan/CPU Qwen -> CPU FLUX -> CPU VAE");
+    } else if (runtime_mode == 1) {
+        push_log(SD_LOG_INFO,
+                 "Creating Duration-AI ultra-safe Vulkan runtime: 1-GFLOP submits + split-big=16");
+    } else {
+        push_log(SD_LOG_INFO,
+                 q1
+                     ? "Creating Duration-AI validated q1 Adreno runtime: q1 direct + watchdog-bounded Vulkan"
+                     : "Creating Duration-AI conservative Q4 Adreno runtime: 2-GFLOP submits + split-big=16");
+    }
 
     g_ctx = new_sd_ctx(&p);
     if (!g_ctx || !sd_ctx_supports_image_generation(g_ctx)) {
@@ -273,7 +303,7 @@ extern "C" jint JNI_OnLoad(JavaVM*, void*) {
     sd_set_log_callback(log_cb, nullptr);
     sd_set_progress_callback(progress_cb, nullptr);
     sd_set_preview_callback(nullptr, PREVIEW_NONE, 1, false, false, nullptr);
-    configure_adreno_environment(false);
+    configure_adreno_environment(false, 0);
     return JNI_VERSION_1_6;
 }
 
@@ -282,7 +312,7 @@ JNIEXPORT jstring JNICALL
 Java_com_localflux_adreno_AdrenoNativeBridge_systemInfo(JNIEnv* env, jclass) {
     std::string info = sd_get_system_info() ? sd_get_system_info() : "Duration Adreno FLUX runtime";
     info += "\nRuntime fork: duration-ai/bonsai-cpp @ 932ff747";
-    info += "\nAdreno policy: 4 GFLOP submit cap, split-big=8, cont-input, rms_norm_mul fusion disabled";
+    info += "\nAdreno policy: watchdog-bounded submits, split-big projection slicing, cont-input, rms_norm_mul fusion gate";
     return env->NewStringUTF(info.c_str());
 }
 
@@ -304,6 +334,7 @@ Java_com_localflux_adreno_AdrenoNativeBridge_generate(
         jboolean vaeTiling,
         jobjectArray jLoraPaths,
         jfloatArray jLoraStrengths,
+        jint runtimeMode,
         jint qwenMode,
         jint cpuThreads) {
 
@@ -326,7 +357,8 @@ Java_com_localflux_adreno_AdrenoNativeBridge_generate(
     sd_set_progress_callback(progress_cb, nullptr);
     sd_set_preview_callback(nullptr, PREVIEW_NONE, 1, false, false, nullptr);
 
-    sd_ctx_t* ctx = ensure_context(env, diffusion, vae, llm, qwenMode, cpuThreads);
+    const int safe_runtime_mode = std::max(0, std::min(2, static_cast<int>(runtimeMode)));
+    sd_ctx_t* ctx = ensure_context(env, diffusion, vae, llm, safe_runtime_mode, qwenMode, cpuThreads);
     if (!ctx || env->ExceptionCheck()) {
         g_phase.store(7);
         return nullptr;
