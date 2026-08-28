@@ -5,9 +5,12 @@ import android.app.ActivityManager;
 import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.ComponentName;
 import android.content.ContentValues;
+import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.ServiceConnection;
 import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.graphics.Bitmap;
@@ -21,8 +24,12 @@ import android.os.Bundle;
 import android.os.Debug;
 import android.os.Environment;
 import android.os.Handler;
+import android.os.IBinder;
 import android.os.Looper;
+import android.os.Message;
+import android.os.Messenger;
 import android.os.PowerManager;
+import android.os.RemoteException;
 import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
@@ -183,6 +190,56 @@ public class MainActivity extends Activity {
     private FaceFusionProcessor faceProcessor;
 
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
+    private final Messenger diffusionWorkerReply = new Messenger(new Handler(Looper.getMainLooper(), this::handleDiffusionWorkerMessage));
+    private Messenger diffusionWorker;
+    private Bundle pendingDiffusionRequest;
+    private volatile boolean diffusionWorkerBound = false;
+    private volatile boolean usingAdrenoWorker = false;
+    private volatile boolean diffusionWorkerExpected = false;
+    private volatile boolean diffusionWorkerCancelRequested = false;
+
+    private final ServiceConnection diffusionWorkerConnection = new ServiceConnection() {
+        @Override public void onServiceConnected(ComponentName name, IBinder service) {
+            diffusionWorker = new Messenger(service);
+            diffusionWorkerBound = true;
+            appendConsole("WORKER", "Adreno diffusion worker connected in process :diffusion.");
+            Bundle request = pendingDiffusionRequest;
+            pendingDiffusionRequest = null;
+            if (request != null) {
+                Message msg = Message.obtain(null, GenerationWorkerService.MSG_GENERATE);
+                msg.replyTo = diffusionWorkerReply;
+                msg.setData(request);
+                try {
+                    diffusionWorker.send(msg);
+                } catch (RemoteException e) {
+                    handleDiffusionWorkerFailure("Could not start diffusion worker: " + safeMessage(e));
+                }
+            }
+        }
+
+        @Override public void onServiceDisconnected(ComponentName name) {
+            diffusionWorker = null;
+            diffusionWorkerBound = false;
+            if (diffusionWorkerExpected && generationActive) {
+                if (diffusionWorkerCancelRequested) {
+                    finishDiffusionWorker("Generation cancelled.", false);
+                } else {
+                    handleDiffusionWorkerFailure(
+                            "The isolated Adreno inference process terminated. The Studio UI stayed alive. "
+                            + "This usually means a Qualcomm Vulkan watchdog/device-lost event; see the worker log above.");
+                }
+            }
+        }
+
+        @Override public void onBindingDied(ComponentName name) {
+            onServiceDisconnected(name);
+        }
+
+        @Override public void onNullBinding(ComponentName name) {
+            handleDiffusionWorkerFailure("Android returned a null binding for the diffusion worker.");
+        }
+    };
+
     private volatile boolean generationActive = false;
     private int lastPreviewVersion = 0;
     private volatile int lastProgressPhase = -1;
@@ -228,15 +285,17 @@ public class MainActivity extends Activity {
     private final Runnable progressPoller = new Runnable() {
         @Override public void run() {
             if (!generationActive) return;
-            try {
-                int[] snapshot = nativeProgressSnapshot();
-                renderProgressSnapshot(snapshot);
-                if (lastProgressPhase == 3 && livePreviewCheck != null && livePreviewCheck.isChecked()) {
-                    int[] preview = nativePreviewSnapshot(lastPreviewVersion);
-                    renderPreviewSnapshot(preview);
+            if (!usingAdrenoWorker) {
+                try {
+                    int[] snapshot = nativeProgressSnapshot();
+                    renderProgressSnapshot(snapshot);
+                    if (lastProgressPhase == 3 && livePreviewCheck != null && livePreviewCheck.isChecked()) {
+                        int[] preview = nativePreviewSnapshot(lastPreviewVersion);
+                        renderPreviewSnapshot(preview);
+                    }
+                } catch (Throwable ignored) {
+                    // The local worker thread owns the actual generation error path.
                 }
-            } catch (Throwable ignored) {
-                // The worker thread owns the actual generation error path.
             }
             if (generationActive) uiHandler.postDelayed(this, 300);
         }
@@ -817,7 +876,12 @@ public class MainActivity extends Activity {
         cancelButton.setVisibility(View.GONE);
         cancelButton.setOnClickListener(v -> {
             appendConsole("APP", "Cancellation requested by user.");
-            nativeCancel();
+            if (usingAdrenoWorker) {
+                diffusionWorkerCancelRequested = true;
+                sendDiffusionWorkerCancel();
+            } else {
+                nativeCancel();
+            }
             status.setText("Cancellation requested…");
         });
         LinearLayout.LayoutParams cancelLp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48));
