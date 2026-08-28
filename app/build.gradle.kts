@@ -91,6 +91,7 @@ android {
 }
 
 dependencies {
+    implementation(project(":adreno_runtime"))
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.29.0")
     testImplementation("junit:junit:4.13.2")
 }
