@@ -105,6 +105,157 @@ s = s.replace(old, new, 1)
 p.write_text(s)
 PY
 
+# Adreno can crash while graph-cut FLUX rotates a successfully synchronized
+# cache generation. Keep old FLUX cache buffers/contexts alive until the whole
+# forward pass is finished instead of destroying them between segments.
+python3 - <<'PY'
+from pathlib import Path
+
+p = Path("vendor/stable-diffusion.cpp/src/core/ggml_extend.hpp")
+s = p.read_text()
+
+old_members = '''    ggml_context* cache_ctx            = nullptr;
+    ggml_backend_buffer_t cache_buffer = nullptr;
+'''
+new_members = '''    ggml_context* cache_ctx            = nullptr;
+    ggml_backend_buffer_t cache_buffer = nullptr;
+    std::vector<ggml_context*> localflux_retired_cache_ctxs;
+    std::vector<ggml_backend_buffer_t> localflux_retired_cache_buffers;
+'''
+if old_members not in s:
+    raise SystemExit("Pinned GGMLRunner cache members changed")
+s = s.replace(old_members, new_members, 1)
+
+old_free = '''    void free_cache_ctx() {
+        if (cache_ctx != nullptr) {
+            ggml_free(cache_ctx);
+            cache_ctx = nullptr;
+        }
+    }
+'''
+new_free = '''    bool localflux_defer_flux_cache_free() const {
+        const char* value = std::getenv("LOCALFLUX_DEFER_FLUX_CACHE_FREE");
+        return value != nullptr && value[0] == '1' && get_desc() == "flux";
+    }
+
+    void localflux_retire_cache_generation(ggml_context* ctx, ggml_backend_buffer_t buffer) {
+        if (!localflux_defer_flux_cache_free()) {
+            if (buffer != nullptr) {
+                ggml_backend_buffer_free(buffer);
+            }
+            if (ctx != nullptr) {
+                ggml_free(ctx);
+            }
+            return;
+        }
+        if (buffer != nullptr) {
+            localflux_retired_cache_buffers.push_back(buffer);
+        }
+        if (ctx != nullptr) {
+            localflux_retired_cache_ctxs.push_back(ctx);
+        }
+        LOG_DEBUG("%s LocalFlux deferred cache free: generations=%zu buffers=%zu",
+                  get_desc().c_str(),
+                  localflux_retired_cache_ctxs.size(),
+                  localflux_retired_cache_buffers.size());
+    }
+
+    void localflux_free_retired_cache_generations() {
+        if (localflux_retired_cache_buffers.empty() && localflux_retired_cache_ctxs.empty()) {
+            return;
+        }
+        if (sched != nullptr) {
+            ggml_backend_sched_synchronize(sched);
+        }
+        if (runtime_backend != nullptr) {
+            ggml_backend_synchronize(runtime_backend);
+        }
+        for (ggml_backend_buffer_t buffer : localflux_retired_cache_buffers) {
+            if (buffer != nullptr) {
+                ggml_backend_buffer_free(buffer);
+            }
+        }
+        for (ggml_context* ctx : localflux_retired_cache_ctxs) {
+            if (ctx != nullptr) {
+                ggml_free(ctx);
+            }
+        }
+        LOG_DEBUG("%s LocalFlux released %zu deferred cache generations",
+                  get_desc().c_str(),
+                  localflux_retired_cache_ctxs.size());
+        localflux_retired_cache_buffers.clear();
+        localflux_retired_cache_ctxs.clear();
+    }
+
+    void free_cache_ctx() {
+        if (cache_ctx != nullptr) {
+            ggml_free(cache_ctx);
+            cache_ctx = nullptr;
+        }
+    }
+'''
+if old_free not in s:
+    raise SystemExit("Pinned GGMLRunner free_cache_ctx changed")
+s = s.replace(old_free, new_free, 1)
+
+old_empty = '''        if (merged_cache_sources.empty()) {
+            if (old_cache_buffer != nullptr) {
+                ggml_backend_buffer_free(old_cache_buffer);
+            }
+            if (old_cache_ctx != nullptr) {
+                ggml_free(old_cache_ctx);
+            }
+            return true;
+        }
+'''
+new_empty = '''        if (merged_cache_sources.empty()) {
+            localflux_retire_cache_generation(old_cache_ctx, old_cache_buffer);
+            return true;
+        }
+'''
+if old_empty not in s:
+    raise SystemExit("Pinned empty cache rotation block changed")
+s = s.replace(old_empty, new_empty, 1)
+
+old_rotate = '''        if (old_cache_buffer != nullptr) {
+            ggml_backend_buffer_free(old_cache_buffer);
+        }
+        if (old_cache_ctx != nullptr) {
+            ggml_free(old_cache_ctx);
+        }
+        return true;
+'''
+new_rotate = '''        localflux_retire_cache_generation(old_cache_ctx, old_cache_buffer);
+        return true;
+'''
+if old_rotate not in s:
+    raise SystemExit("Pinned cache rotation block changed")
+s = s.replace(old_rotate, new_rotate, 1)
+
+old_all = '''    void free_cache_ctx_and_buffer() {
+        free_cache_buffer();
+        free_cache_ctx();
+    }
+'''
+new_all = '''    void free_cache_ctx_and_buffer() {
+        if (sched != nullptr) {
+            ggml_backend_sched_synchronize(sched);
+        }
+        if (runtime_backend != nullptr) {
+            ggml_backend_synchronize(runtime_backend);
+        }
+        free_cache_buffer();
+        free_cache_ctx();
+        localflux_free_retired_cache_generations();
+    }
+'''
+if old_all not in s:
+    raise SystemExit("Pinned free_cache_ctx_and_buffer changed")
+s = s.replace(old_all, new_all, 1)
+
+p.write_text(s)
+PY
+
 # The pinned runner can free Vulkan scheduler/parameter buffers immediately after
 # Qwen conditioning. Force completion of queued backend work first. This is
 # especially important on Android where native process aborts bypass Java error
