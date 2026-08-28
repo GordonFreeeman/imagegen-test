@@ -2953,7 +2953,21 @@ public class MainActivity extends Activity {
         uiHandler.removeCallbacks(progressPoller);
         uiHandler.removeCallbacks(diagnosticsPoller);
         prefs.edit().putBoolean("generation_in_progress", false).apply();
-        nativeCancel();
+
+        if (usingAdrenoWorker) {
+            diffusionWorkerCancelRequested = true;
+            try { sendDiffusionWorkerCancel(); } catch (Throwable ignored) {}
+            if (diffusionWorkerBound) {
+                try { unbindService(diffusionWorkerConnection); } catch (Throwable ignored) {}
+            }
+            diffusionWorkerBound = false;
+            diffusionWorker = null;
+            diffusionWorkerExpected = false;
+            usingAdrenoWorker = false;
+        } else {
+            nativeCancel();
+        }
+
         worker.shutdownNow();
         diagnosticsWorker.shutdownNow();
         super.onDestroy();
