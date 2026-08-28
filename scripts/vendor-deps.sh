@@ -4,14 +4,66 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 SD_COMMIT="50d640568388f876b0d63ee6ddb6bc86d997ec64"
+BONSAI_COMMIT="932ff747077f47bcf27b7de4f38724b9ccaa2616"
 FACE_COMMIT="f38a70e4bacaab4132538421c471f9d4d3ccac00"
 
-rm -rf vendor/stable-diffusion.cpp vendor/android-face-fusion
+rm -rf vendor/stable-diffusion.cpp vendor/bonsai-cpp vendor/android-face-fusion
 mkdir -p vendor
 
 git clone --recursive https://github.com/leejet/stable-diffusion.cpp vendor/stable-diffusion.cpp
 git -C vendor/stable-diffusion.cpp checkout "$SD_COMMIT"
 git -C vendor/stable-diffusion.cpp submodule update --init --recursive
+
+# FLUX.2 Android/Adreno production backend. This fork is kept separate from the
+# generic pinned stable-diffusion.cpp runtime so existing model compatibility is
+# preserved. It contains the Snapdragon 8 Elite / Adreno 830 KGSL watchdog and
+# Vulkan dispatch fixes validated by Duration AI on a Galaxy S25+.
+git clone https://github.com/duration-ai/bonsai-cpp.git vendor/bonsai-cpp
+git -C vendor/bonsai-cpp checkout "$BONSAI_COMMIT"
+
+# Keep the short-token Klein conditioning optimization in the Adreno runtime.
+# The diffusion-facing embedding remains padded to 512 positions, but Qwen only
+# computes the prompt plus a small configurable minimum.
+python3 - <<'PY'
+from pathlib import Path
+
+p = Path("vendor/bonsai-cpp/src/conditioner.hpp")
+s = p.read_text()
+if "#include <cstdlib>" not in s:
+    anchor = "#include <"
+    # conditioner.hpp includes transitively, but make getenv/strtol explicit.
+    s = "#include <cstdlib>\n" + s
+
+old = '''        } else if (version == VERSION_FLUX2_KLEIN) {
+            prompt_template_encode_start_idx = 0;
+            min_length                       = 512;
+            out_layers                       = {9, 18, 27};
+'''
+new = '''        } else if (version == VERSION_FLUX2_KLEIN) {
+            prompt_template_encode_start_idx = 0;
+
+            int localflux_min_tokens = 24;
+            if (const char* value = std::getenv("LOCALFLUX_KLEIN_MIN_TOKENS")) {
+                char* end = nullptr;
+                long parsed = std::strtol(value, &end, 10);
+                if (end != value) {
+                    if (parsed < 0) parsed = 0;
+                    if (parsed > 512) parsed = 512;
+                    localflux_min_tokens = static_cast<int>(parsed);
+                }
+            }
+            min_length                       = localflux_min_tokens;
+            hidden_states_min_length         = 512;
+            out_layers                       = {9, 18, 27};
+
+            LOG_INFO("LocalFlux Adreno Klein conditioning: Qwen min=%d, embeddings>=512, states=9/18/27",
+                     min_length);
+'''
+if old not in s:
+    raise SystemExit("Duration conditioner layout changed; refusing to apply LocalFlux Klein patch")
+s = s.replace(old, new, 1)
+p.write_text(s)
+PY
 
 # Local Flux Studio mobile performance patch for the pinned runtime.
 # FLUX.2 Klein upstream pads Qwen3 to 512 input tokens before running the
@@ -303,4 +355,5 @@ done
 cp vendor/android-face-fusion/app/src/main/assets/emap.bin app/src/main/assets/emap.bin
 
 echo "Pinned stable-diffusion.cpp: $SD_COMMIT"
+echo "Pinned Adreno FLUX runtime: $BONSAI_COMMIT"
 echo "Pinned Android Face Fusion: $FACE_COMMIT"
