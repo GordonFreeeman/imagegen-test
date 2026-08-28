@@ -54,10 +54,20 @@ new = '''        } else if (version == VERSION_FLUX2_KLEIN) {
             }
             min_length                       = localflux_min_tokens;
             hidden_states_min_length         = 512;
-            out_layers                       = {9, 18, 27};
 
-            LOG_INFO("LocalFlux Adreno Klein conditioning: Qwen min=%d, embeddings>=512, states=9/18/27",
-                     min_length);
+            const bool localflux_early_layers = [] {
+                const char* value = std::getenv("LOCALFLUX_KLEIN_EARLY_LAYERS");
+                return value != nullptr && value[0] == '1';
+            }();
+            if (localflux_early_layers) {
+                out_layers = {6, 12, 18};
+            } else {
+                out_layers = {9, 18, 27};
+            }
+
+            LOG_INFO("LocalFlux Adreno Klein conditioning: Qwen min=%d, embeddings>=512, states=%s",
+                     min_length,
+                     localflux_early_layers ? "6/12/18 (experimental)" : "9/18/27");
 '''
 if old not in s:
     raise SystemExit("Duration conditioner layout changed; refusing to apply LocalFlux Klein patch")
