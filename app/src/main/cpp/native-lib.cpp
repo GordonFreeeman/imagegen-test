@@ -244,28 +244,30 @@ struct TextEncoderStrategy {
     const char* max_vram;
     bool diffusion_flash_attn;
     bool resident_diffusion;
+    bool defer_flux_cache_free;
     const char* label;
 };
 
 TextEncoderStrategy text_encoder_strategy(int mode) {
-    switch (std::max(0, std::min(15, mode))) {
-        case 0: return {24,  false, false, false, "1.25", true,  false, "cpu-min24-mobile1250"};
-        case 1: return {0,   false, false, false, "1.25", true,  false, "cpu-real-tokens-mobile1250"};
-        case 2: return {24,  true,  false, false, "1.00", true,  false, "cpu-ultra-early18-mobile1000"};
-        case 3: return {32,  false, false, false, "1.25", true,  false, "cpu-min32-mobile1250"};
-        case 4: return {64,  false, false, false, "1.25", true,  false, "cpu-min64-mobile1250"};
-        case 5: return {128, false, false, false, "1.25", true,  false, "cpu-min128-mobile1250"};
-        case 6: return {512, false, false, false, "1.25", true,  false, "cpu-full512-mobile1250"};
-        case 7: return {24,  false, true,  false, "0.90", true,  false, "vulkan-safe-min24-mobile900"};
-        case 8: return {32,  false, true,  false, "1.25", true,  false, "vulkan-balanced-min32-mobile1250"};
-        case 9: return {512, false, true,  false, "1.25", true,  false, "vulkan-full512-mobile1250"};
-        case 10:return {512, false, false, true,  "1.00", true,  false, "cpu-disk-full512-mobile1000"};
-        case 11:return {32,  false, true,  false, "-1",   false, false, "vulkan-legacy-auto-min32"};
-        case 12:return {24,  false, true,  true,  "0.75", true,  false, "vulkan-safe-disk-min24-mobile750"};
-        case 13:return {24,  false, true,  false, "0.90", true,  true,  "vulkan-qwen-resident-flux"};
-        case 14:return {24,  false, false, false, "1.25", true,  true,  "cpu-qwen-resident-flux"};
-        case 15:return {24,  false, true,  true,  "0.75", true,  true,  "vulkan-disk-qwen-resident-flux"};
-        default:return {24, false, false, false, "1.25", true, false, "cpu-min24-mobile1250"};
+    switch (std::max(0, std::min(16, mode))) {
+        case 0: return {24,  false, false, false, "1.25", true,  false, false, "cpu-min24-mobile1250"};
+        case 1: return {0,   false, false, false, "1.25", true,  false, false, "cpu-real-tokens-mobile1250"};
+        case 2: return {24,  true,  false, false, "1.00", true,  false, false, "cpu-ultra-early18-mobile1000"};
+        case 3: return {32,  false, false, false, "1.25", true,  false, false, "cpu-min32-mobile1250"};
+        case 4: return {64,  false, false, false, "1.25", true,  false, false, "cpu-min64-mobile1250"};
+        case 5: return {128, false, false, false, "1.25", true,  false, false, "cpu-min128-mobile1250"};
+        case 6: return {512, false, false, false, "1.25", true,  false, false, "cpu-full512-mobile1250"};
+        case 7: return {24,  false, true,  false, "0.90", true,  false, false, "vulkan-safe-min24-mobile900"};
+        case 8: return {32,  false, true,  false, "1.25", true,  false, false, "vulkan-balanced-min32-mobile1250"};
+        case 9: return {512, false, true,  false, "1.25", true,  false, false, "vulkan-full512-mobile1250"};
+        case 10:return {512, false, false, true,  "1.00", true,  false, false, "cpu-disk-full512-mobile1000"};
+        case 11:return {32,  false, true,  false, "-1",   false, false, false, "vulkan-legacy-auto-min32"};
+        case 12:return {24,  false, true,  true,  "0.75", true,  false, false, "vulkan-safe-disk-min24-mobile750"};
+        case 13:return {24,  false, true,  false, "0.90", true,  true,  false, "vulkan-qwen-resident-flux"};
+        case 14:return {24,  false, false, false, "1.25", true,  true,  false, "cpu-qwen-resident-flux"};
+        case 15:return {24,  false, true,  true,  "0.75", true,  true,  false, "vulkan-disk-qwen-resident-flux"};
+        case 16:return {24,  false, true,  false, "0.75", true,  false, true,  "vulkan-qwen-deferred-cache-flux"};
+        default:return {24, false, true, false, "0.75", true, false, true, "vulkan-qwen-deferred-cache-flux"};
     }
 }
 
@@ -279,7 +281,7 @@ std::string make_key(
         int te_mode,
         int n_threads) {
     return model + "\n" + diffusion + "\n" + vae + "\n" + clipL + "\n" + t5 + "\n" + llm +
-           "\nmobile-safe-v8-te-mode-" + std::to_string(te_mode) +
+           "\nmobile-safe-v9-te-mode-" + std::to_string(te_mode) +
            "\nthreads-" + std::to_string(n_threads);
 }
 
@@ -294,7 +296,7 @@ sd_ctx_t* ensure_context(
         int te_mode,
         int requested_threads) {
 
-    te_mode = std::max(0, std::min(15, te_mode));
+    te_mode = std::max(0, std::min(16, te_mode));
     const TextEncoderStrategy strategy = text_encoder_strategy(te_mode);
 
     int detected_threads = sd_get_num_physical_cores();
@@ -308,6 +310,7 @@ sd_ctx_t* ensure_context(
     setenv("LOCALFLUX_KLEIN_MIN_TOKENS", min_tokens, 1);
     setenv("LOCALFLUX_KLEIN_EARLY_LAYERS", strategy.early_layers ? "1" : "0", 1);
     setenv("LOCALFLUX_DIFFUSION_RESIDENT", strategy.resident_diffusion ? "1" : "0", 1);
+    setenv("LOCALFLUX_DEFER_FLUX_CACHE_FREE", strategy.defer_flux_cache_free ? "1" : "0", 1);
 
     // Model files are mmap-backed. Sequential access is a safe Android/Linux
     // read-ahead hint and reduces first-run page-fault stalls without pinning
@@ -387,13 +390,15 @@ sd_ctx_t* ensure_context(
                       "Loading split-model context "
                       "(diffusion=gpu, te=%s, vae=cpu, params diffusion=cpu te=%s, strategy=%s, "
                       "qwen_min=%d, states=%s, threads=%d, mmap=sequential, qwen_budget=%s GiB, "
-                      "diffusion=%s, stream_layers=%d, diffusion_fa=%d; TE runner buffers synchronized and released after conditioning)",
+                      "diffusion=%s, stream_layers=%d, diffusion_fa=%d, deferred_cache=%d; "
+                      "TE runner buffers synchronized and released after conditioning)",
                       te_runtime, te_params, strategy.label, strategy.min_tokens,
                       strategy.early_layers ? "6/12/18" : "9/18/27",
                       effective_threads, strategy.max_vram,
                       strategy.resident_diffusion ? "resident/no-graph-cut" : "segmented",
                       strategy.resident_diffusion ? 0 : 1,
-                      strategy.diffusion_flash_attn ? 1 : 0);
+                      strategy.diffusion_flash_attn ? 1 : 0,
+                      strategy.defer_flux_cache_free ? 1 : 0);
         push_console_log(SD_LOG_INFO, mode_line);
         __android_log_print(ANDROID_LOG_INFO, TAG, "%s", mode_line);
     } else {
