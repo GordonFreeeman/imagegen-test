@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <deque>
 #include <limits>
