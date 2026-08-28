@@ -1398,6 +1398,7 @@ public class MainActivity extends Activity {
         }
 
         int requestedTextEncoderMode = selectedTextEncoderMode();
+        int requestedFluxRuntimeMode = selectedFluxRuntimeMode();
         int requestedCpuThreads = selectedCpuThreads();
         String quantHint = qwenQuantHint();
 
@@ -1408,6 +1409,7 @@ public class MainActivity extends Activity {
                 + " · distilled=" + String.format(Locale.US, "%.1f", distilledGuidance)
                 + " · preview=" + livePreviewCheck.isChecked()
                 + " · textEncoder=" + textEncoderModeLabel(requestedTextEncoderMode)
+                + " · fluxRuntime=" + fluxRuntimeModeLabel(requestedFluxRuntimeMode)
                 + " · cpuThreads=" + cpuThreadsLabel(requestedCpuThreads)
                 + (quantHint.isEmpty() ? "" : " · Qwen=" + quantHint));
         prefs.edit().putBoolean("generation_in_progress", true).commit();
@@ -1427,11 +1429,13 @@ public class MainActivity extends Activity {
         final String[] loraPaths = loraPathsForGeneration();
         final float[] loraStrengths = loraStrengthsForGeneration();
         final int textEncoderMode = requestedTextEncoderMode;
+        final int fluxRuntimeMode = requestedFluxRuntimeMode;
         final int cpuThreads = requestedCpuThreads;
         int activeLoras = 0;
         for (String path : loraPaths) if (path != null && !path.isEmpty()) activeLoras++;
         generationConfigSummary = MODEL_PROFILES[profile] + " · " + width + "×" + height
                 + " · " + steps + " steps · Qwen " + textEncoderModeLabel(textEncoderMode)
+                + " · " + fluxRuntimeModeLabel(fluxRuntimeMode)
                 + " · " + cpuThreadsLabel(cpuThreads)
                 + (quantHint.isEmpty() ? "" : " · " + quantHint)
                 + " · preview " + (useLivePreview ? "ON" : "OFF")
@@ -1461,12 +1465,14 @@ public class MainActivity extends Activity {
             request.putBoolean(GenerationWorkerService.K_VAE_TILING, useVaeTiling);
             request.putStringArray(GenerationWorkerService.K_LORA_PATHS, loraPaths);
             request.putFloatArray(GenerationWorkerService.K_LORA_STRENGTHS, loraStrengths);
+            request.putInt(GenerationWorkerService.K_RUNTIME_MODE, fluxRuntimeMode);
             request.putInt(GenerationWorkerService.K_QWEN_MODE, adrenoWorkerQwenMode(textEncoderMode));
             request.putInt(GenerationWorkerService.K_THREADS, cpuThreads);
 
             appendConsole("WORKER",
-                    "Routing FLUX.2 Klein to Duration-AI Adreno backend in :diffusion process · "
-                    + "GFLOP submit cap=4 · split-big=8 · cont-input=1 · fusion gate=rms_norm_mul · "
+                    "Routing FLUX.2 Klein to Duration-AI backend in :diffusion process · "
+                    + fluxRuntimeModeLabel(fluxRuntimeMode)
+                    + " · cont-input=1 · fusion gate=rms_norm_mul · "
                     + (adrenoWorkerQwenMode(textEncoderMode) == 0 ? "Qwen CPU" : "Qwen Vulkan"));
             startDiffusionWorker(request);
             return;
