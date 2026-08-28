@@ -1223,11 +1223,29 @@ public class MainActivity extends Activity {
         });
     }
 
-    private boolean useAdrenoWorkerForProfile(int profile) {
-        // The Duration-AI runtime is intentionally narrow and validated for
-        // FLUX.2 Klein. Generic/Z-Image/FLUX.1 remain on the pinned upstream
-        // engine so existing model compatibility is not sacrificed.
-        return profile == 1 || profile == 2;
+    private boolean looksLikeFlux2Klein4BStack() {
+        String diffusion = storedName("diffusion");
+        String llm = storedName("llm");
+        String d = diffusion == null ? "" : diffusion.toLowerCase(Locale.US);
+        String l = llm == null ? "" : llm.toLowerCase(Locale.US);
+        boolean flux2 = d.contains("flux2") || d.contains("flux-2") || d.contains("flux.2");
+        boolean klein = d.contains("klein");
+        boolean heavy = d.contains("9b") || d.contains("32b") || d.contains("dev");
+        boolean qwen8 = l.contains("8b") || l.contains("qwen3-8");
+        return flux2 && klein && !heavy && !qwen8;
+    }
+
+    private boolean useAdrenoWorkerForGeneration(int profile) {
+        // Named Klein 4B/Base profiles always use the validated Android path.
+        if (profile == 1 || profile == 2) return true;
+
+        // Auto/custom is common during iterative model testing. Detect the actual
+        // imported split stack as well so changing the UI profile cannot silently
+        // route the same Klein 4B files back into the old crash-prone Vulkan path.
+        if (profile == 0 || profile == 8) {
+            return looksLikeFlux2Klein4BStack();
+        }
+        return false;
     }
 
     private int adrenoWorkerQwenMode(int textEncoderMode) {
@@ -1441,7 +1459,7 @@ public class MainActivity extends Activity {
                 + " · preview " + (useLivePreview ? "ON" : "OFF")
                 + (activeLoras > 0 ? " · LoRA×" + activeLoras : "");
 
-        if (useAdrenoWorkerForProfile(profile)) {
+        if (useAdrenoWorkerForGeneration(profile)) {
             generationConfigSummary += " · Duration Adreno worker · watchdog-bounded Vulkan";
             status.setText("Starting crash-isolated Adreno 830 FLUX runtime…");
             if (useLivePreview) {
