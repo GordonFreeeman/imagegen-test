@@ -49,7 +49,7 @@ public class GenerationWorkerService extends Service {
     public static final String K_LORA_PATHS = "lora_paths";
     public static final String K_LORA_STRENGTHS = "lora_strengths";
     public static final String K_RUNTIME_MODE = "runtime_mode";
-    public static final String K_QWEN_MODE = "qwen_mode";
+    public static final String K_TEXT_ENCODER_MODE = "text_encoder_mode";
     public static final String K_THREADS = "threads";
     public static final String K_RESULT_PATH = "result_path";
     public static final String K_ERROR = "error";
@@ -151,7 +151,7 @@ public class GenerationWorkerService extends Service {
                         args.getStringArray(K_LORA_PATHS),
                         args.getFloatArray(K_LORA_STRENGTHS),
                         args.getInt(K_RUNTIME_MODE, 0),
-                        args.getInt(K_QWEN_MODE, 1),
+                        args.getInt(K_TEXT_ENCODER_MODE, 16),
                         args.getInt(K_THREADS, 8));
 
                 if (pixels == null || pixels.length != width * height) {
