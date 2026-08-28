@@ -25,7 +25,7 @@ public final class AdrenoNativeBridge {
             String[] loraPaths,
             float[] loraStrengths,
             int runtimeMode,
-            int qwenMode,
+            int textEncoderMode,
             int cpuThreads);
 
     public static native String drainLogs();
