@@ -727,3 +727,36 @@ Target release: v1.3.6 (versionCode 13), compile/target SDK 36, minSdk 29.
 
 **Known limitation:**
 - CI cannot reproduce Qualcomm Adreno driver behavior. The release is specifically structured to bypass the graph-cut cache path observed immediately before the real-device crash, but only physical-device execution can confirm the driver survives the resident FLUX graph.
+
+
+# v1.3.7 Adreno Stream-Safe FLUX Review
+
+Target release: v1.3.7 (versionCode 14), compile/target SDK 36, minSdk 29.
+
+## Logic Inquisitor
+
+**Verdict:** APPROVED FOR DEVICE TESTING
+
+**Observed device behavior motivating this release:**
+- Qwen3 4B Q4_0 Vulkan conditioning now finishes in seconds.
+- The v1.3.6 resident-FLUX mode reaches sampling step 0, stalls the whole phone for several seconds, then the native process crashes.
+- Immediately before that stall the app reports about 4.10 GB RSS, 4.00 GB PSS and 2.34 GB system RAM available, while the native log shows diffusion model tensor loading has completed.
+- This is consistent with resident FLUX staging most/all of the ~2.4 GB transformer into Adreno-visible unified memory at once, rather than a Qwen failure.
+
+**Fix:**
+- New recommended mode: Vulkan Qwen -> FLUX Stream-Safe, 0.75 GiB.
+- Qwen remains short-sequence Vulkan and is released before diffusion.
+- FLUX returns to bounded graph-cut/layer streaming to avoid the resident step-0 memory spike.
+- A Local Flux patch changes FLUX graph-cache lifetime only in Stream-Safe mode: old cache buffers and their GGML contexts are quarantined instead of being destroyed between segments.
+- Deferred cache generations are synchronized and released together after the complete FLUX forward pass.
+- This avoids the exact cache-buffer destruction point immediately following the last successful native log seen in the earlier streamed crash, while keeping total diffusion residency far below the resident-FLUX mode.
+- Resident and legacy streamed modes remain selectable as diagnostics.
+- v1.3.6 Vulkan/resident selections migrate to Stream-Safe automatically.
+
+**Preserved constraints:**
+- stable-diffusion.cpp pinned to 50d640568388f876b0d63ee6ddb6bc86d997ec64.
+- Android Face Fusion pinned to f38a70e4bacaab4132538421c471f9d4d3ccac00.
+- Persistent signing key, SDK 36, arm64-v8a, NDK 28.2, Vulkan, 16 KB alignment and existing model/import compatibility remain unchanged.
+
+**Known limitation:**
+- CI cannot validate Qualcomm driver behavior. This release deliberately avoids both previously observed failure modes: aggressive cache destruction during segmented FLUX and full resident-FLUX staging at sampling step 0.
