@@ -24,6 +24,7 @@ public final class AdrenoNativeBridge {
             boolean vaeTiling,
             String[] loraPaths,
             float[] loraStrengths,
+            int runtimeMode,
             int qwenMode,
             int cpuThreads);
 
