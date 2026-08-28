@@ -704,25 +704,30 @@ public class MainActivity extends Activity {
                 "CPU + disk · full 512 · emergency",
                 "Vulkan Legacy · min 32 · AUTO VRAM · diagnostic",
                 "Vulkan Safe + disk staging · min 24 · 0.75 GiB",
-                "Vulkan Qwen → Resident FLUX · min 24 · recommended",
+                "Vulkan Qwen → Resident FLUX · min 24 · diagnostic",
                 "CPU Qwen → Resident FLUX · min 24 · diagnostic",
-                "Vulkan Qwen + disk → Resident FLUX · min 24"
+                "Vulkan Qwen + disk → Resident FLUX · min 24 · diagnostic",
+                "Vulkan Qwen → FLUX Stream-Safe · 0.75 GiB · recommended"
         });
 
-        // v1.3.6 keeps Qwen segmented for speed/memory but moves FLUX itself
-        // out of graph-cut streaming. The screenshot/crash boundary was inside
-        // the FLUX cache path, so v1.3.5 Safe migrates to resident-FLUX mode.
+        // v1.3.7 keeps the fast short Vulkan Qwen path, but restores segmented
+        // FLUX with deferred cache destruction. Resident FLUX caused a step-0
+        // unified-memory stall on Adreno, while the old streamer freed cache
+        // generations too aggressively between graph segments.
         int savedTeMode;
         int teSchema = prefs.getInt("text_encoder_mode_schema", 0);
-        if (teSchema < 6) {
+        if (teSchema < 7) {
             int oldMode = prefs.contains("text_encoder_mode")
                     ? Math.max(0, prefs.getInt("text_encoder_mode", 0))
                     : 0;
-            if (teSchema >= 5) {
-                if (oldMode == 7 || oldMode == 8 || oldMode == 9 || oldMode == 11) savedTeMode = 13;
-                else if (oldMode == 12) savedTeMode = 15;
+            if (teSchema >= 6) {
+                if (oldMode >= 7 && oldMode <= 15) savedTeMode = 16;
+                else savedTeMode = Math.max(0, Math.min(16, oldMode));
+            } else if (teSchema >= 5) {
+                if (oldMode == 7 || oldMode == 8 || oldMode == 9 || oldMode == 11 || oldMode == 12) savedTeMode = 16;
+                else if (oldMode >= 13 && oldMode <= 15) savedTeMode = 16;
                 else if (oldMode >= 0 && oldMode <= 6) savedTeMode = oldMode;
-                else savedTeMode = Math.max(0, Math.min(15, oldMode));
+                else savedTeMode = 16;
             } else if (teSchema >= 4) {
                 if (oldMode >= 7 && oldMode <= 9) savedTeMode = 13;
                 else savedTeMode = Math.max(0, Math.min(10, oldMode));
@@ -741,18 +746,18 @@ public class MainActivity extends Activity {
             }
             prefs.edit()
                     .putInt("text_encoder_mode", savedTeMode)
-                    .putInt("text_encoder_mode_schema", 6)
+                    .putInt("text_encoder_mode_schema", 7)
                     .remove("extreme_ram_saver")
                     .apply();
         } else {
-            savedTeMode = Math.max(0, Math.min(15, prefs.getInt("text_encoder_mode", 13)));
+            savedTeMode = Math.max(0, Math.min(16, prefs.getInt("text_encoder_mode", 16)));
         }
 
         textEncoderModeSpinner.setSelection(savedTeMode);
         textEncoderModeSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
                 prefs.edit()
-                        .putInt("text_encoder_mode", Math.max(0, Math.min(15, position)))
+                        .putInt("text_encoder_mode", Math.max(0, Math.min(16, position)))
                         .putInt("text_encoder_mode_schema", 6)
                         .apply();
             }
@@ -780,7 +785,7 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(52)));
 
         TextView ramHint = text(
-                "Resident FLUX is now the primary FLUX.2 Klein path on 16 GB Adreno. Qwen still uses a bounded short graph, then its GPU buffers are released. FLUX is loaded once into bounded 512 MiB Vulkan chunks and kept resident for denoising, bypassing the graph-cut cache path that was active immediately before the crash. The older streamed modes remain for comparison. CPU Q4_0 can use KleidiAI but remains a slower diagnostic fallback.",
+                "Stream-Safe is the primary FLUX.2 Klein path on Adreno. Qwen still finishes quickly on Vulkan, then FLUX runs in a 0.75 GiB segmented budget. Unlike the older streamer, previous FLUX cache generations are kept alive until the complete forward pass finishes, avoiding the cache-buffer destruction point seen immediately before the earlier crash. Resident FLUX remains available only for diagnosis because it caused a large unified-memory stall at sampling step 0.",
                 11, MUTED, false);
         ramHint.setPadding(dp(2), dp(4), dp(2), dp(5));
         card.addView(ramHint);
@@ -831,7 +836,7 @@ public class MainActivity extends Activity {
         progress.setVisibility(View.GONE);
         card.addView(progress, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(10)));
 
-        status = text("Ready. Start FLUX.2 Klein with Vulkan Qwen → Resident FLUX at 512².", 12, MUTED, false);
+        status = text("Ready. Start FLUX.2 Klein with Vulkan Qwen → FLUX Stream-Safe at 512².", 12, MUTED, false);
         status.setGravity(Gravity.CENTER_HORIZONTAL);
         status.setPadding(dp(5), dp(9), dp(5), dp(10));
         card.addView(status);
@@ -1793,9 +1798,9 @@ public class MainActivity extends Activity {
 
     private int selectedTextEncoderMode() {
         if (textEncoderModeSpinner == null) {
-            return Math.max(0, Math.min(15, prefs.getInt("text_encoder_mode", 13)));
+            return Math.max(0, Math.min(16, prefs.getInt("text_encoder_mode", 16)));
         }
-        return Math.max(0, Math.min(15, textEncoderModeSpinner.getSelectedItemPosition()));
+        return Math.max(0, Math.min(16, textEncoderModeSpinner.getSelectedItemPosition()));
     }
 
     private String textEncoderModeLabel(int mode) {
@@ -1815,7 +1820,8 @@ public class MainActivity extends Activity {
             case 13:return "Vulkan Qwen 24 → resident FLUX";
             case 14:return "CPU Qwen 24 → resident FLUX";
             case 15:return "Vulkan Qwen disk 24 → resident FLUX";
-            default:return "Vulkan Qwen 24 → resident FLUX";
+            case 16:return "Vulkan Qwen 24 → FLUX Stream-Safe 0.75 GiB";
+            default:return "Vulkan Qwen 24 → FLUX Stream-Safe 0.75 GiB";
         }
     }
 
