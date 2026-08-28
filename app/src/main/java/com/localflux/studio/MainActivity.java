@@ -818,7 +818,7 @@ public class MainActivity extends Activity {
             @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
                 prefs.edit()
                         .putInt("text_encoder_mode", Math.max(0, Math.min(16, position)))
-                        .putInt("text_encoder_mode_schema", 6)
+                        .putInt("text_encoder_mode_schema", 7)
                         .apply();
             }
             @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
@@ -847,7 +847,8 @@ public class MainActivity extends Activity {
                 "Klein 4B uses a separate crash-isolated process with Duration AI's Adreno 830 watchdog fixes. "
                 + "Auto-tuned uses the validated q1 path when a q1_0 Bonsai DiT is selected, and a more conservative "
                 + "2-GFLOP / split-16 policy for Q4. Ultra-safe cuts submissions to 1 GFLOP. CPU DiT is the slow, "
-                + "driver-independent fallback.",
+                + "driver-independent fallback. Qwen token/state presets are preserved; legacy disk-staging presets "
+                + "use CPU mmap parameters in this backend because the Duration fork has no disk parameter device.",
                 11, MUTED, false);
         runtimeHint.setPadding(dp(2), dp(4), dp(2), dp(8));
         card.addView(runtimeHint);
@@ -1248,10 +1249,6 @@ public class MainActivity extends Activity {
         return false;
     }
 
-    private int adrenoWorkerQwenMode(int textEncoderMode) {
-        return isCpuTextEncoderMode(textEncoderMode) ? 0 : 1;
-    }
-
     private void startDiffusionWorker(Bundle request) {
         pendingDiffusionRequest = request;
         diffusionWorkerExpected = true;
@@ -1484,14 +1481,14 @@ public class MainActivity extends Activity {
             request.putStringArray(GenerationWorkerService.K_LORA_PATHS, loraPaths);
             request.putFloatArray(GenerationWorkerService.K_LORA_STRENGTHS, loraStrengths);
             request.putInt(GenerationWorkerService.K_RUNTIME_MODE, fluxRuntimeMode);
-            request.putInt(GenerationWorkerService.K_QWEN_MODE, adrenoWorkerQwenMode(textEncoderMode));
+            request.putInt(GenerationWorkerService.K_TEXT_ENCODER_MODE, textEncoderMode);
             request.putInt(GenerationWorkerService.K_THREADS, cpuThreads);
 
             appendConsole("WORKER",
                     "Routing FLUX.2 Klein to Duration-AI backend in :diffusion process · "
                     + fluxRuntimeModeLabel(fluxRuntimeMode)
-                    + " · cont-input=1 · fusion gate=rms_norm_mul · "
-                    + (adrenoWorkerQwenMode(textEncoderMode) == 0 ? "Qwen CPU" : "Qwen Vulkan"));
+                    + " · cont-input=1 · fusion gate=rms_norm_mul · Qwen strategy="
+                    + textEncoderModeLabel(textEncoderMode));
             startDiffusionWorker(request);
             return;
         }
@@ -2113,7 +2110,7 @@ public class MainActivity extends Activity {
     }
 
     private boolean isCpuTextEncoderMode(int mode) {
-        return mode >= 0 && mode <= 6 || mode == 10;
+        return (mode >= 0 && mode <= 6) || mode == 10 || mode == 14;
     }
 
     private int selectedFluxRuntimeMode() {
@@ -2640,9 +2637,9 @@ public class MainActivity extends Activity {
     private String profileDescription(int p) {
         switch (p) {
             case 1:
-                return "BEST PHONE FIT · FLUX.2 Klein 4B\nNeeds only Diffusion / transformer + FLUX.2 VAE/AE + Qwen3 4B LLM. CLIP-L, T5XXL and Full checkpoint are hidden because this profile does not use them. Turbo CPU text encoding is recommended on Snapdragon; it uses DOTPROD/I8MM for Q4_K_M and releases Qwen runner buffers before FLUX sampling.";
+                return "BEST PHONE FIT · FLUX.2 Klein 4B\nNeeds Diffusion / transformer + FLUX.2 VAE/AE + Qwen3 4B. Klein 4B is routed to the crash-isolated Duration-AI Adreno backend: watchdog-bounded Vulkan DiT, CPU VAE, selectable CPU/Vulkan Qwen, and a CPU-DiT fallback. Q4 diffusion uses the conservative submit policy automatically.";
             case 2:
-                return "QUALITY PHONE PROFILE · FLUX.2 Klein Base 4B\nSame files as Klein 4B, but the base model is intended for a fuller ~20-step sampling run and higher CFG.";
+                return "QUALITY PHONE PROFILE · FLUX.2 Klein Base 4B\nSame isolated Adreno backend and split files as Klein 4B, but the Base model is intended for a fuller ~20-step sampling run and higher CFG.";
             case 3:
                 return "EXPERIMENTAL · FLUX.2 Klein 9B\nImport: diffusion + FLUX.2 VAE/AE + Qwen3 8B. A 16 GB phone may run a strongly quantized stack, but memory pressure and thermals will be much higher.";
             case 4:
