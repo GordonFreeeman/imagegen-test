@@ -15,8 +15,8 @@ android {
         applicationId = "com.localflux.studio"
         minSdk = 29
         targetSdk = 36
-        versionCode = 14
-        versionName = "1.3.7"
+        versionCode = 15
+        versionName = "1.4.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
