@@ -133,7 +133,7 @@ old_free = '''    void free_cache_ctx() {
         }
     }
 '''
-new_free = '''    bool localflux_defer_flux_cache_free() const {
+new_free = '''    bool localflux_defer_flux_cache_free() {
         const char* value = std::getenv("LOCALFLUX_DEFER_FLUX_CACHE_FREE");
         return value != nullptr && value[0] == '1' && get_desc() == "flux";
     }
