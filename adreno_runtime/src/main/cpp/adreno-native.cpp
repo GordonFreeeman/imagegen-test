@@ -178,15 +178,46 @@ bool is_q1_model(const std::string& path) {
            lower.find("q1-0") != std::string::npos;
 }
 
+struct QwenStrategy {
+    int min_tokens;
+    bool early_layers;
+    bool gpu;
+    bool disk_requested;
+    const char* label;
+};
+
+QwenStrategy qwen_strategy(int mode) {
+    switch (std::max(0, std::min(16, mode))) {
+        case 0: return {24,  false, false, false, "cpu-min24"};
+        case 1: return {0,   false, false, false, "cpu-real-tokens"};
+        case 2: return {24,  true,  false, false, "cpu-min24-early6-12-18"};
+        case 3: return {32,  false, false, false, "cpu-min32"};
+        case 4: return {64,  false, false, false, "cpu-min64"};
+        case 5: return {128, false, false, false, "cpu-min128"};
+        case 6: return {512, false, false, false, "cpu-full512"};
+        case 7: return {24,  false, true,  false, "vulkan-min24"};
+        case 8: return {32,  false, true,  false, "vulkan-min32"};
+        case 9: return {512, false, true,  false, "vulkan-full512"};
+        case 10:return {512, false, false, true,  "cpu-full512-disk-requested"};
+        case 11:return {32,  false, true,  false, "vulkan-min32-legacy"};
+        case 12:return {24,  false, true,  true,  "vulkan-min24-disk-requested"};
+        case 13:return {24,  false, true,  false, "vulkan-min24-resident-legacy"};
+        case 14:return {24,  false, false, false, "cpu-min24-resident-legacy"};
+        case 15:return {24,  false, true,  true,  "vulkan-min24-disk-resident-legacy"};
+        case 16:return {24,  false, true,  false, "vulkan-min24-streamsafe"};
+        default:return {24, false, true, false, "vulkan-min24-streamsafe"};
+    }
+}
+
 std::string make_key(const std::string& diffusion,
                      const std::string& vae,
                      const std::string& llm,
                      int runtime_mode,
-                     int qwen_mode,
+                     int text_encoder_mode,
                      int threads) {
     return diffusion + "\n" + vae + "\n" + llm +
-           "\nadreno-watchdog-v2\nruntime-" + std::to_string(runtime_mode) +
-           "\nqwen-" + std::to_string(qwen_mode) +
+           "\nadreno-watchdog-v3\nruntime-" + std::to_string(runtime_mode) +
+           "\nte-mode-" + std::to_string(text_encoder_mode) +
            "\nthreads-" + std::to_string(threads);
 }
 
@@ -195,7 +226,7 @@ sd_ctx_t* ensure_context(JNIEnv* env,
                          const std::string& vae,
                          const std::string& llm,
                          int runtime_mode,
-                         int qwen_mode,
+                         int text_encoder_mode,
                          int requested_threads) {
     if (diffusion.empty() || vae.empty() || llm.empty()) {
         jclass cls = env->FindClass("java/lang/RuntimeException");
@@ -209,10 +240,15 @@ sd_ctx_t* ensure_context(JNIEnv* env,
             : std::max(2, std::min(8, detected));
 
     const bool q1 = is_q1_model(diffusion);
+    const QwenStrategy qwen = qwen_strategy(text_encoder_mode);
     configure_adreno_environment(q1, runtime_mode);
-    setenv("LOCALFLUX_KLEIN_MIN_TOKENS", "24", 1);
 
-    const std::string key = make_key(diffusion, vae, llm, runtime_mode, qwen_mode, threads);
+    char qwen_min_tokens[16];
+    std::snprintf(qwen_min_tokens, sizeof(qwen_min_tokens), "%d", qwen.min_tokens);
+    setenv("LOCALFLUX_KLEIN_MIN_TOKENS", qwen_min_tokens, 1);
+    setenv("LOCALFLUX_KLEIN_EARLY_LAYERS", qwen.early_layers ? "1" : "0", 1);
+
+    const std::string key = make_key(diffusion, vae, llm, runtime_mode, text_encoder_mode, threads);
     if (g_ctx && g_ctx_key == key) return g_ctx;
 
     if (g_ctx) {
@@ -238,14 +274,16 @@ sd_ctx_t* ensure_context(JNIEnv* env,
     // executes the DiT on Vulkan. Qwen can stay on Vulkan for the fast 24-token
     // path, with CPU available as the compatibility option.
     if (runtime_mode == 2) {
-        p.backend = qwen_mode == 0
-                ? "te=cpu,vae=cpu,diffusion=cpu"
-                : "te=vulkan0,vae=cpu,diffusion=cpu";
+        p.backend = qwen.gpu
+                ? "te=vulkan0,vae=cpu,diffusion=cpu"
+                : "te=cpu,vae=cpu,diffusion=cpu";
     } else {
-        p.backend = qwen_mode == 0
-                ? "te=cpu,vae=cpu,diffusion=vulkan0"
-                : "te=vulkan0,vae=cpu,diffusion=vulkan0";
+        p.backend = qwen.gpu
+                ? "te=vulkan0,vae=cpu,diffusion=vulkan0"
+                : "te=cpu,vae=cpu,diffusion=vulkan0";
     }
+    // This fork exposes normal GGML backends only. Legacy disk-staging presets
+    // are mapped to mmap-backed CPU parameter storage here.
     p.params_backend = "te=cpu,vae=cpu,diffusion=cpu";
 
     // Do not graph-cut this fork. Its proven Adreno strategy instead bounds
@@ -258,17 +296,20 @@ sd_ctx_t* ensure_context(JNIEnv* env,
     // Duration's validated Adreno path keeps numerically sensitive tensors f32.
     p.tensor_type_rules = "norm=f32,_in.=f32,modulation=f32,final_layer=f32";
 
-    if (runtime_mode == 2) {
-        push_log(SD_LOG_INFO,
-                 "Creating Duration-AI CPU-DiT fallback: Vulkan/CPU Qwen -> CPU FLUX -> CPU VAE");
-    } else if (runtime_mode == 1) {
-        push_log(SD_LOG_INFO,
-                 "Creating Duration-AI ultra-safe Vulkan runtime: 1-GFLOP submits + split-big=16");
-    } else {
-        push_log(SD_LOG_INFO,
-                 q1
-                     ? "Creating Duration-AI validated q1 Adreno runtime: q1 direct + watchdog-bounded Vulkan"
-                     : "Creating Duration-AI conservative Q4 Adreno runtime: 2-GFLOP submits + split-big=16");
+    {
+        char runtime_line[512];
+        std::snprintf(runtime_line, sizeof(runtime_line),
+                      "Creating Duration-AI runtime: mode=%d, DiT=%s, qwen=%s, qwen_min=%d, states=%s, "
+                      "params=CPU/mmap%s, watchdog=%s",
+                      runtime_mode,
+                      runtime_mode == 2 ? "CPU" : "Vulkan",
+                      qwen.gpu ? "Vulkan" : "CPU",
+                      qwen.min_tokens,
+                      qwen.early_layers ? "6/12/18 EXP" : "9/18/27",
+                      qwen.disk_requested ? " (disk preset mapped to CPU/mmap)" : "",
+                      runtime_mode == 1 ? "ultra-safe 1-GFLOP/split16"
+                                        : (q1 ? "validated q1 bounded-submit" : "conservative Q4 2-GFLOP/split16"));
+        push_log(SD_LOG_INFO, runtime_line);
     }
 
     g_ctx = new_sd_ctx(&p);
@@ -335,7 +376,7 @@ Java_com_localflux_adreno_AdrenoNativeBridge_generate(
         jobjectArray jLoraPaths,
         jfloatArray jLoraStrengths,
         jint runtimeMode,
-        jint qwenMode,
+        jint textEncoderMode,
         jint cpuThreads) {
 
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -358,7 +399,9 @@ Java_com_localflux_adreno_AdrenoNativeBridge_generate(
     sd_set_preview_callback(nullptr, PREVIEW_NONE, 1, false, false, nullptr);
 
     const int safe_runtime_mode = std::max(0, std::min(2, static_cast<int>(runtimeMode)));
-    sd_ctx_t* ctx = ensure_context(env, diffusion, vae, llm, safe_runtime_mode, qwenMode, cpuThreads);
+    const int safe_text_encoder_mode = std::max(0, std::min(16, static_cast<int>(textEncoderMode)));
+    sd_ctx_t* ctx = ensure_context(env, diffusion, vae, llm,
+                                   safe_runtime_mode, safe_text_encoder_mode, cpuThreads);
     if (!ctx || env->ExceptionCheck()) {
         g_phase.store(7);
         return nullptr;
