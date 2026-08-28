@@ -1410,6 +1410,42 @@ public class MainActivity extends Activity {
                 + " · preview " + (useLivePreview ? "ON" : "OFF")
                 + (activeLoras > 0 ? " · LoRA×" + activeLoras : "");
 
+        if (useAdrenoWorkerForProfile(profile)) {
+            generationConfigSummary += " · Duration Adreno worker · watchdog-bounded Vulkan";
+            status.setText("Starting crash-isolated Adreno 830 FLUX runtime…");
+            if (useLivePreview) {
+                appendConsole("WORKER",
+                        "Live preview is suppressed in the crash-isolated FLUX backend to keep Binder traffic "
+                        + "and VAE work out of the critical diffusion path. Final PNG output is unaffected.");
+            }
+
+            Bundle request = new Bundle();
+            request.putString(GenerationWorkerService.K_DIFFUSION, diffusion);
+            request.putString(GenerationWorkerService.K_VAE, vae);
+            request.putString(GenerationWorkerService.K_LLM, llm);
+            request.putString(GenerationWorkerService.K_PROMPT, prompt);
+            request.putString(GenerationWorkerService.K_NEGATIVE, negativePrompt);
+            request.putInt(GenerationWorkerService.K_WIDTH, width);
+            request.putInt(GenerationWorkerService.K_HEIGHT, height);
+            request.putInt(GenerationWorkerService.K_STEPS, steps);
+            request.putFloat(GenerationWorkerService.K_TEXT_CFG, textCfg);
+            request.putFloat(GenerationWorkerService.K_DISTILLED, distilledGuidance);
+            request.putLong(GenerationWorkerService.K_SEED, finalSeed);
+            request.putBoolean(GenerationWorkerService.K_VAE_TILING, useVaeTiling);
+            request.putStringArray(GenerationWorkerService.K_LORA_PATHS, loraPaths);
+            request.putFloatArray(GenerationWorkerService.K_LORA_STRENGTHS, loraStrengths);
+            request.putInt(GenerationWorkerService.K_QWEN_MODE, adrenoWorkerQwenMode(textEncoderMode));
+            request.putInt(GenerationWorkerService.K_THREADS, cpuThreads);
+
+            appendConsole("WORKER",
+                    "Routing FLUX.2 Klein to Duration-AI Adreno backend in :diffusion process · "
+                    + "GFLOP submit cap=4 · split-big=8 · cont-input=1 · fusion gate=rms_norm_mul · "
+                    + (adrenoWorkerQwenMode(textEncoderMode) == 0 ? "Qwen CPU" : "Qwen Vulkan"));
+            startDiffusionWorker(request);
+            return;
+        }
+
+        usingAdrenoWorker = false;
         worker.execute(() -> {
             int previousPriority;
             try {
